@@ -18,20 +18,20 @@ Deployed at: `https://kamranaghlami.github.io/esp_web_tool/`
 
 ### Goals
 - One page, works offline after load, nothing to install.
-- Keyboard first, but mouse works everywhere.
+- Keyboard first, but mouse works everywhere, and **touch works on supported Android phones** (§4.1).
 - Flashing that is at least as reliable as `esptool.py write_flash` for common chips.
 - A simple manifest format that firmware authors can generate in CI.
 
 ### Non-goals (v1)
 - Private repos or authenticated GitHub access (a PAT may come later, see §15).
 - eFuse burning, flash encryption, secure boot workflows.
-- Non-Chromium browsers (Web Serial is Chromium only). They get a clear "unsupported" screen.
+- Non-Chromium browsers (Web Serial is Chromium only), and **all iOS/iPadOS browsers** (WebKit has neither Web Serial nor WebUSB). They get a clear "unsupported" screen that still lays out properly at phone size, and the demo stream still works.
 
 ## 2. Platform constraints
 
 | Constraint | Consequence |
 |---|---|
-| Web Serial API: Chrome/Edge/Opera desktop only | Detect `navigator.serial`; if it is missing, show the unsupported screen. |
+| Web Serial API: Chrome/Edge/Opera desktop; Chrome on Android only partly (see §4.1) | Detect `navigator.serial`; on Android without it, fall back to WebUSB + `web-serial-polyfill`; with neither, show the unsupported screen. |
 | Secure context required | GitHub Pages is HTTPS, and `localhost` works in dev. |
 | `requestPort()` and `<input type=file>` need a user gesture | A key press counts as one. Run these calls directly from the key or click handler, never after an `await`. |
 | Ports granted before are available through `getPorts()` without a gesture | Used to reconnect after a native-USB chip re-enumerates on reset (§9). |
@@ -80,7 +80,7 @@ Target feel: **running a CLI tool through ttyd**. The page is one full-window xt
   - Side effect: the same core could later run in a real terminal under Node (a different `Tty` + serial backend). This is not a v1 goal, but the design should not rule it out.
 - **Rendering**: immediate mode. On each state change (batched per animation frame), widgets draw into a `Screen` cell grid (char, fg, bg, attrs, width). That grid is diffed against the previous frame, and only changed runs are emitted (cursor moves + SGR). Uses the alternate screen and a hidden cursor, except when editing text.
 - **Input**: one parser for xterm's `onData` stream: CSI/SS3 keys, Alt as an ESC prefix, bracketed paste (`?2004`), SGR mouse (`?1000;1006`: click, wheel, drag). Keys and mouse reach the app as a terminal app would get them, which is what makes it feel real.
-- **Layout**: nested horizontal/vertical splits with fixed/flex sizes, recomputed on resize. Below **80×24**, show a "terminal too small" notice, as real TUIs do.
+- **Layout**: nested horizontal/vertical splits with fixed/flex sizes, recomputed on resize. Three size classes: **wide** (≥ 120 cols, split panes), **normal** (≥ 80×24, one pane at a time) and **compact** (≥ 40×14, phones; §4.1). Only below 40×14 show a "terminal too small" notice, as real TUIs do. M0 still has the old 80×24 minimum, which is why an iPhone 14 Pro (about 48 cols in portrait) shows the notice.
 - **Widgets** (`src/tui/`): Box (title in border), Text, List, Table, TextInput, Select (popup list), Checkbox/Radio, ProgressBar, Dialog/Confirm, Toast, StatusBar, KeyBar, ScrollView, TermPane (the headless blit).
 - **Monitor pane = a terminal inside the terminal.** Device bytes go into an `@xterm/headless` instance sized to the pane. That instance parses ANSI, cursor moves and clears just like a real terminal. Each frame we copy its visible buffer cells (`IBufferCell` gives char, colors, attributes) into the pane region. **Zoom** (`z`) makes the pane full screen. We still blit rather than pass bytes straight through, so the key bar and status line stay.
 - **Width**: use the `unicode11` addon, and use the same width table in `Screen`, so our layout and xterm agree. The UI's own strings use no emoji or ambiguous-width glyphs. Box drawing, block elements and `●▶✓✗` are fine.
@@ -160,6 +160,38 @@ interface FlashPlan {
 
 ### Narrow screens (< 120 cols)
 Flash and Monitor become full-screen views; `1` / `2` switches between them. The status line and key bar stay.
+
+### 4.1 Phones (compact layout, touch, soft keyboard)
+
+Feedback from M0: on an iPhone 14 Pro the app shows "terminal too small". Phones are a target for Android, so every view must also work in the compact class. **Rule from M1 on: every new view is designed and e2e-tested at 48×40 as well as at desktop size**, even before the rest of M2b lands.
+
+**Which phones can actually connect** (checked 2026-10-17):
+- **Android, Chrome ≥ M149 on devices with the Android Serial API**: native Web Serial for wired ports, rolling out from 2026 Q2 on "a limited set of devices" (blink-dev PSA, Feb 2026). Bluetooth RFCOMM serial is also partly supported. Any USB-serial chip the OS supports should work.
+- **Other Android + Chrome**: WebUSB with Google's `web-serial-polyfill`, the path esptool-js documents. **Only USB CDC-ACM devices work**: chips using their own USB port (ESP32-S2/S3/C3/C6/H2/P4 USB-Serial/JTAG or TinyUSB CDC), and CDC-class bridges such as CH9102/CH343. **CP210x, CH340 and FTDI bridges do not work** (vendor-specific protocols), so the UI must say so plainly instead of failing at connect.
+- **iPhone/iPad**: no path. Show the unsupported notice, laid out for the compact class.
+- All Android phones need USB-OTG (a USB-C cable or adapter). Phones power the board from the port, so mention that power-hungry boards may brown out.
+
+**Sizing**: phones get a slightly smaller font (13px instead of 14px) chosen so portrait gives at least 44 cols (iPhone 14 Pro / Pixel 7: about 48×40; landscape about 100×20 with the keyboard closed). Pinch-zoom is disabled on the page; font size is set in Settings instead (`Ctrl -`/`+` doesn't exist on phones).
+
+**Compact layout (40–79 cols)**: one pane at a time, as in "normal", plus:
+- The status line shrinks to icons and short values (`● 303a:1001 115200 · ESP32-S3`); details go to an info overlay.
+- Tables drop columns by priority: the parts table keeps `[x] offset name`, and size moves to the detail line of the selected row.
+- Dialogs take the full width; the help overlay becomes a full-screen scrolling view.
+- No box-in-box nesting deeper than one level, so borders don't eat 4–6 of 48 columns.
+
+**Touch** (xterm.js has little touch support, so the app handles it):
+- A `touch/` bridge in `src/browser/` turns touch events on the terminal element into the same input events as the mouse: tap → click at the cell, vertical swipe → wheel (with momentum), long press → open a context menu for the item under the finger (the touch version of a right-click).
+- **Tap targets**: interactive rows and key-bar entries are at least one full row tall and padded with a space on each side; nothing needs a precise single-cell tap.
+- Text selection: a "Select" mode in the monitor menu switches off mouse reporting so xterm's own selection works, then "Copy" copies.
+
+**Extra-keys bar (Termux style)**: in the compact class, and whenever a touch device is detected, the bottom two rows of the TUI become an on-screen key row drawn inside the terminal: `Esc  Tab  Ctrl  ↑ ↓ ← →  ^A  ^]  ⌨`. `Ctrl` is sticky (it applies to the next key from the soft keyboard), and `⌨` shows or hides the soft keyboard. This keeps the CLI feel and makes the monitor's `Ctrl+A` / `Ctrl+]` usable without a hardware keyboard.
+
+**Soft keyboard**:
+- It only opens when it's needed: when a text field or the live monitor gets focus (the app focuses or blurs xterm's hidden textarea). Otherwise taps must not bring it up.
+- On `visualViewport` resize the app refits, so the TUI sits above the keyboard instead of under it, and the focused field stays visible.
+- xterm's textarea gets `autocomplete/autocorrect/autocapitalize="off"` and `spellcheck=false`. Gboard composition (predictive text) must still produce sane input; test it on a real phone, because this is a known weak spot of xterm.js on Android.
+
+**Installable (later)**: a web app manifest + service worker lets the app be "installed" so it opens full screen without the URL bar, which suits the terminal feel and also gives offline use (Goal 1).
 
 ### Keyboard
 A browser tab is a hostile terminal. Chrome **does not let pages intercept** `Ctrl+T`, `Ctrl+W`, `Ctrl+N`, `Ctrl+Tab` or `Ctrl+Shift+T/W/N`. `Alt+digit` and `Ctrl+digit` switch browser tabs, and F5/F11/F12 are unreliable. So we use the lazygit/htop model: **single-key hotkeys** whenever no text input or monitor has focus, plus a **prefix key** inside the monitor. The prefix is `Ctrl+A`, as in picocom/minicom/screen; `idf.py monitor`'s `Ctrl+T` cannot be caught in a browser.
@@ -393,7 +425,8 @@ Settings (`localStorage`, best effort): theme, default bauds, auto-monitor, time
 
 - **Unit (Vitest)**: input parser (key, mouse and paste sequences); Screen diff renderer (golden frames as text snapshots, rendered into `@xterm/headless` and compared cell by cell); layout; GitHub URL parsing; manifest validation and adapters (fixtures for all three formats); smart offsets; overlap and size validation; the streaming UTF-8 decoder; rate-limit and ETag cache logic (mocked `fetch`).
 - **UI (Playwright)**: a fake `navigator.serial` injected before load. Assertions read the xterm buffer (`term.buffer.active`) as text, which is exactly what the user sees. It drives connect → chip info, the monitor echoing input, keyboard navigation, and the manifest → parts table flow against a mocked GitHub API.
-- **Hardware (manual checklist, per release)**: ESP32 (CP210x), ESP32-S3 (native USB), ESP32-C3 (native USB), ESP32-S2 (native USB, manual boot). For each: flash, verify, auto-monitor, reset, monitor baud change, unplug and replug.
+- **Hardware (manual checklist, per release)**: ESP32 (CP210x), ESP32-S3 (native USB), ESP32-C3 (native USB), ESP32-S2 (native USB, manual boot). For each: flash, verify, auto-monitor, reset, monitor baud change, unplug and replug. **Android phone over OTG**: one native-USB board (polyfill path), one CP210x board (must show the "not supported on this phone" message, or work if the phone has native Web Serial), plus typing in the live monitor with Gboard.
+- **Mobile layout (Playwright)**: run the e2e suite under device emulation as well (Pixel 7 and iPhone 14 profiles, with touch enabled): compact layout renders, taps hit the right widgets, the extra-keys bar sends the right bytes, and iOS shows the unsupported notice instead of "too small".
 
 ## 14. Milestones
 
@@ -402,9 +435,10 @@ Settings (`localStorage`, best effort): theme, default bauds, auto-monitor, time
 | M0 ✅ | Scaffold (Vite/TS), `Tty` + input parser, Screen/diff renderer, layout + core widgets, keymap, help overlay, CI + Pages deploy. **Spike**: `requestPort()` from a key and from a mouse click via xterm `onData`; headless-terminal blit performance at 2 Mbaud | The empty shell is live on Pages, CI is green, and the spike passes |
 | M1 | PortManager, connect + chip info, Files source, validation, flash/verify/reset | A local IDF build flashes onto ESP32 and ESP32-S3 |
 | M2 | Serial monitor, port handoff, native-USB reconnect | Flash → auto-monitor works on a native-USB chip |
+| M2b | **Phones**: compact size class, touch bridge, extra-keys bar, soft-keyboard handling, WebUSB + `web-serial-polyfill` fallback with the CDC-only notice, Android device emulation in e2e | Flash + monitor a native-USB ESP32 from an Android phone over OTG |
 | M3 | GitHub source, manifest + adapters, Manual assist download, deep links | A real release with `esp-web-tool.json` flashes via manual assist |
 | M4 | Asset proxy + its workflow, URL source, JSON Schema, producer workflow docs | One-click flash from a release link |
-| M5 | Polish: narrow layout, light theme, log save, error hints, accessibility pass | — |
+| M5 | Polish: light theme, log save, error hints, accessibility pass, installable app (PWA) | — |
 
 ### M0 findings (2026-10-17)
 
@@ -416,6 +450,8 @@ Settings (`localStorage`, best effort): theme, default bauds, auto-monitor, time
 - **TypeScript 6** is pinned because `typescript-eslint` does not support TS 7 yet.
 
 ## 15. Open questions
+
+0. **Phones**: which Android phone(s) will you test with? That decides whether we can rely on native Web Serial (M149+, device-dependent) or only on the polyfill. Do your target boards use native USB or CP210x/CH340 bridges?
 
 1. **CORS strategy**: are you OK with running a Cloudflare Worker proxy (free tier, your account)? The alternatives are: Manual assist only, or requiring firmware repos to publish binaries to their own Pages (which makes the "GitHub release" flow less central).
 2. **Where the manifest lives**: "in the release's root" could mean (a) a **release asset** (this draft), or (b) a file at the **repo root at the release tag**, fetched via `raw.githubusercontent.com`, which *is* CORS-enabled. (b) gets the manifest past CORS without a proxy, but the binaries would still need one. Should we support both?
