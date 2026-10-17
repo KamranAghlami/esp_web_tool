@@ -1,0 +1,18 @@
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  /* Matches the terminal background so the page has no visible chrome. */
+  background: #0d1117;
+}
+
+#terminal {
+  position: fixed;
+  inset: 0;
+  padding: 4px 6px;
+}
+
+#terminal .xterm {
+  height: 100%;
+}
