@@ -8,7 +8,7 @@ import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { WebglAddon } from '@xterm/addon-webgl';
 import { Terminal } from '@xterm/xterm';
-import { App } from './app/app';
+import { App, type DemoMode } from './app/app';
 import { darkTheme } from './tui/theme';
 import { XtermTty } from './tty/xterm-tty';
 
@@ -46,6 +46,21 @@ async function copyText(text: string, refocus: () => void): Promise<void> {
     ta.remove();
     refocus();
     if (!ok) throw err;
+  }
+}
+
+/** `?demo` starts the synthetic log stream, `?demo=flood` at about 2 Mbaud. */
+function demoFromUrl(): DemoMode {
+  const v = new URLSearchParams(location.search).get('demo');
+  return v === null ? 'off' : v === 'flood' ? 'flood' : 'normal';
+}
+
+/** Reading `localStorage` itself throws when site data is blocked. */
+function localStorageOrNone(): Storage | undefined {
+  try {
+    return window.localStorage;
+  } catch {
+    return undefined;
   }
 }
 
@@ -114,6 +129,8 @@ async function main(): Promise<void> {
     tty: new XtermTty(term),
     openUrl: (url) => window.open(url, '_blank', 'noopener'),
     copy: (text) => copyText(text, () => term.focus()),
+    storage: localStorageOrNone(),
+    demo: demoFromUrl(),
   });
   app.start();
   term.focus();

@@ -167,18 +167,21 @@ test.describe('app', () => {
     await expectOnScreen(page, 'Help · Esc to close');
   });
 
-  test('baud and data format are picked from Ctrl+A submenus with a way back', async ({ page }) => {
+  test('baud and data format are picked from Ctrl+A settings with a way back', async ({ page }) => {
     await page.keyboard.press('2');
     await page.keyboard.press('Control+a');
-    await expectOnScreen(page, 'Baud: 115200 ▸');
+    await expectOnScreen(page, 'Settings: 115200 8N1 LF ▸');
     await page.keyboard.press('s');
+    await page.keyboard.press('b');
     await expectOnScreen(page, '‹ Back');
-    await page.keyboard.press('Escape'); // back, not closed
-    await expectOnScreen(page, 'Monitor · Ctrl-A');
-    await page.keyboard.press('s');
+    await expectOnScreen(page, 'Baud rate');
+    await page.keyboard.press('Escape'); // back to Settings, not closed
+    await expectOnScreen(page, 'Baud: 115200 ▸');
+    await page.keyboard.press('b');
     await clickText(page, info, '460800');
     await expect.poll(async () => (await screenText(page)).join()).not.toContain('‹ Back');
     await page.keyboard.press('Control+a');
+    await page.keyboard.press('s');
     await page.keyboard.press('f');
     await clickText(page, info, '8E1');
     await page.keyboard.press('c');
@@ -240,6 +243,41 @@ test.describe('app', () => {
     await expectOnScreen(page, '/s · tx ');
   });
 
+  test('settings are remembered across reloads, and per USB device', async ({ page }) => {
+    // Monitor defaults and flash options stick in this browser.
+    await page.keyboard.press('2');
+    await page.keyboard.press('Control+a');
+    await page.keyboard.press('h'); // colors off
+    await page.keyboard.press('Control+a');
+    await page.keyboard.press('s');
+    await page.keyboard.press('b');
+    await clickText(page, info, '74880');
+    await page.reload();
+    await expectOnScreen(page, 'ESP Web Tool');
+    await page.keyboard.press('2');
+    await page.keyboard.press('Control+a');
+    await expectOnScreen(page, 'Settings: 74880 8N1 LF ▸');
+    expect(await page.evaluate(() => (window as any).__espwt.app.monitor.colorize)).toBe(false);
+    await page.keyboard.press('Escape');
+
+    // The fake device (303a:1001) gets 230400 while connected...
+    await page.keyboard.press('c');
+    await expectOnScreen(page, '@ 74880 8N1');
+    await page.keyboard.press('Control+a');
+    await page.keyboard.press('s');
+    await page.keyboard.press('b');
+    await clickText(page, info, '230400');
+    await expectOnScreen(page, '@ 230400 8N1');
+    await page.keyboard.press('c'); // disconnect
+    await expectOnScreen(page, 'not connected');
+    // ...and keeps it after a reload, whatever the default is meanwhile.
+    await page.reload();
+    await expectOnScreen(page, 'ESP Web Tool');
+    await page.keyboard.press('c');
+    await expectOnScreen(page, '@ 230400 8N1');
+    await expectOnScreen(page, 'remembered settings');
+  });
+
   test('help scrolls with the mouse wheel', async ({ page }) => {
     await page.setViewportSize({ width: 1000, height: 480 });
     await page.keyboard.press('?');
@@ -286,8 +324,7 @@ test.describe('app', () => {
   });
 
   test('M0 spike: demo flood keeps the UI responsive', async ({ page }) => {
-    await page.keyboard.press('D');
-    await page.keyboard.press('D');
+    await page.goto('/?demo=flood');
     await expectOnScreen(page, 'demo:flood');
     await page.waitForTimeout(3000);
     const stats = await page.evaluate(() => (window as any).__espwt.app.stats);

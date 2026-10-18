@@ -191,6 +191,12 @@ export class TextInput implements Focusable {
     this.cursor = [...value].length;
   }
 
+  /** Replace the text, with the cursor at the end. */
+  setValue(value: string): void {
+    this.value = value;
+    this.cursor = [...value].length;
+  }
+
   render(ctx: Ctx, r: Rect, focused: boolean): void {
     const { screen, theme } = ctx;
     const chars = [...this.value];

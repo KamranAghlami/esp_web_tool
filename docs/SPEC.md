@@ -25,7 +25,7 @@ Deployed at: `https://kamranaghlami.github.io/esp_web_tool/`
 ### Non-goals (v1)
 - Private repos or authenticated GitHub access (a PAT may come later, see §15).
 - eFuse burning, flash encryption, secure boot workflows.
-- Non-Chromium browsers (Web Serial is Chromium only), and **all iOS/iPadOS browsers** (WebKit has neither Web Serial nor WebUSB). They get a clear "unsupported" screen that still lays out properly at phone size, and the demo stream still works.
+- Non-Chromium browsers (Web Serial is Chromium only), and **all iOS/iPadOS browsers** (WebKit has neither Web Serial nor WebUSB). They get a clear "unsupported" screen that still lays out properly at phone size, and the demo stream (`?demo`) still works.
 
 ## 2. Platform constraints
 
@@ -207,9 +207,9 @@ A browser tab is a hostile terminal. Chrome **does not let pages intercept** `Ct
 | `a` / `d` / `e` / `o` | Parts table: add file / delete row / edit offset / open folder (TUI file browser) |
 | `Enter` on the Monitor pane | Enter the monitor: **from here every key goes to the device** |
 | `Ctrl+]` | Leave the monitor (back to hotkeys) |
-| `Ctrl+A` | Monitor menu: a centered pop-up that lists its keys and is clickable (live, or with the Monitor pane focused). `r` reset, `b` boot mode, `c` clear, `s` baud ▸, `f` format (8N1, 8E1, 7E1…) ▸, `e` line ending ▸, `h` log-level colors, `z` fullscreen, `Ctrl+A` send a literal `Ctrl+A`, `?` help; later: `d` DTR, `t` timestamps, `l` save log. Menus open centered on the pane they belong to. Submenus have a `‹ Back` row; Esc and Backspace go back. Current values show in the menu labels and the status line (`303a:1001 @ 115200 8N1`), not in the pane header. |
+| `Ctrl+A` | Monitor menu: a centered pop-up that lists its keys and is clickable (live, or with the Monitor pane focused). `r` reset, `b` boot mode, `c` clear, `s` settings ▸ (`b` baud ▸, `f` format 8N1/8E1/7E1… ▸, `e` line ending ▸), `h` log-level colors, `f` fullscreen, `Ctrl+A` send a literal `Ctrl+A`, `?` help; later: `d` DTR, `t` timestamps, `l` save log. Menus open centered on the pane they belong to. Submenus have a `‹ Back` row; Esc and Backspace go back. Current values show in the menu labels and the status line (`303a:1001 @ 115200 8N1`), not in the pane header. |
 | `z` | Fullscreen the focused pane; again to restore |
-| `D` | Demo log stream: off → normal → flood (about 2 Mbaud); for trying the monitor without a device |
+| `D` | Dump (read) flash to a file: whole chip or a range (M1). The demo log stream moved to `?demo` (§10) |
 | `?` | Help overlay listing all keys |
 | `Esc` | Close dialog or overlay, cancel the current input |
 
@@ -408,10 +408,15 @@ Query parameters (they can be combined):
 - `&set=esp32s3-8mb` — preselect the set (if it matches the chip, flashing is one `Ctrl+F` away)
 - `?manifest=https://…/esp-web-tool.json` — URL source
 - `&baud=921600&monitor=115200`
+- `?demo` or `?demo=flood`: a synthetic ESP-IDF log stream in the monitor, for trying it without a device (`flood` is about a saturated 2 Mbaud link; the e2e throughput test uses it). No key starts it.
 
 The tool never starts flashing from a link alone; the user always confirms.
 
-Settings (`localStorage`, best effort): theme, default bauds, auto-monitor, timestamps, asset proxy URL, recent repos (last 10).
+Settings live in `localStorage`, so every browser (each computer or phone) keeps its own. Best effort: blocked or full storage just means nothing sticks. They are saved after each input that changes them (`src/app/settings.ts`, key `esp-web-tool:settings:v1`). Every field is validated on load and falls back to its default.
+- **Now**: flash source, repo and manifest URL fields, flash baud, Erase all / Verify / Reset after, monitor baud / format / line ending, log-level colors.
+- **Per USB device**: baud, format and line ending are also remembered per `vid:pid` (the 32 most recent devices). They are applied when that device is connected again, and the toast says "remembered settings". Web Serial exposes no serial number, so two boards with the same USB ids (e.g. two native-USB ESP32-C5s, both `303a:1001`) share one entry.
+- **Later**: theme, auto-monitor, timestamps, asset proxy URL, recent repos (last 10).
+- URL parameters override remembered settings for that visit.
 
 ## 11. Privacy and security
 
@@ -444,7 +449,7 @@ Settings (`localStorage`, best effort): theme, default bauds, auto-monitor, time
 | # | Scope | Done when |
 |---|---|---|
 | M0 ✅ | Scaffold (Vite/TS), `Tty` + input parser, Screen/diff renderer, layout + core widgets, keymap, help overlay, CI + Pages deploy. **Spike**: `requestPort()` from a key and from a mouse click via xterm `onData`; headless-terminal blit performance at 2 Mbaud | The empty shell is live on Pages, CI is green, and the spike passes |
-| M1 | PortManager, connect + chip info, Files source, validation, flash/verify/reset | A local IDF build flashes onto ESP32 and ESP32-S3 |
+| M1 | PortManager, connect + chip info, Files source, validation, flash/verify/reset, erase (`E`), dump flash to a file (`D`) | A local IDF build flashes onto ESP32 and ESP32-S3 |
 | M2 | Serial monitor, port handoff, native-USB reconnect | Flash → auto-monitor works on a native-USB chip |
 | M2b | **Phones**: compact size class, touch bridge, extra-keys bar, soft-keyboard handling, WebUSB + `web-serial-polyfill` fallback with the CDC-only notice, Android device emulation in e2e | Flash + monitor a native-USB ESP32 from an Android phone over OTG |
 | M3 | GitHub source, manifest + adapters, Manual assist download, deep links | A real release with `esp-web-tool.json` flashes via manual assist |
@@ -475,6 +480,10 @@ Settings (`localStorage`, best effort): theme, default bauds, auto-monitor, time
   - The version links to its own release.
   - The text cursor is hidden while an overlay is open.
   - The flash baud is a `value ▾` picker instead of a `‹ value ›` stepper, and clicking it focuses it.
+- **Fifth pass (2026-10-18)**:
+  - Settings are remembered per browser and per USB device.
+  - Baud, format and line ending moved under Ctrl+A `s` Settings, and `f` is Fullscreen in that menu.
+  - `D` is reserved for dumping flash; the demo stream is now URL-only.
 
 ## 15. Open questions
 

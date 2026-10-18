@@ -29,6 +29,13 @@ import { stringWidth, truncate } from '../tui/width';
 import { BAUD_RATES, FlashPane, formatSize } from './flash-pane';
 import { HELP } from './help';
 import { LINE_ENDINGS, MonitorPane } from './monitor-pane';
+import {
+  type KeyValueStore,
+  rememberPort,
+  type SerialSettings,
+  type Settings,
+  SettingsStore,
+} from './settings';
 
 export const MIN_COLS = 80;
 export const MIN_ROWS = 24;
@@ -47,7 +54,7 @@ type Overlay =
   | { kind: 'help'; scroll: number }
   | { kind: 'confirm'; title: string; body: string[]; onYes: () => void }
   | { kind: 'menu'; menu: Menu };
-type DemoMode = 'off' | 'normal' | 'flood';
+export type DemoMode = 'off' | 'normal' | 'flood';
 
 /** How a gesture-gated browser call was triggered, for the M0 spike (SPEC §3.1). */
 export interface SpikeRecord {
@@ -67,6 +74,13 @@ export interface AppOptions {
   openUrl?: (url: string) => void;
   /** Puts text on the clipboard. */
   copy?: (text: string) => Promise<void>;
+  /** Where settings are remembered (localStorage in the page); none means nothing sticks. */
+  storage?: KeyValueStore;
+  /**
+   * Synthetic log stream into the monitor, for trying it without a device and for the
+   * throughput test. Only from the URL (`?demo`, `?demo=flood`); no key starts it.
+   */
+  demo?: DemoMode;
 }
 
 export class App {
@@ -99,6 +113,9 @@ export class App {
   private openUrl: (url: string) => void;
   private copy: (text: string) => Promise<void>;
   private lastTrigger: 'key' | 'mouse' = 'key';
+  private startDemo: DemoMode;
+  private store: SettingsStore;
+  private settings: Settings;
 
   private demo: DemoMode = 'off';
   private demoTimer: ReturnType<typeof setInterval> | null = null;
@@ -141,6 +158,10 @@ export class App {
     });
     this.flash.onSimDone = () => this.toast('Simulated run finished (nothing was written)', 'ok');
     this.flash.source.onChange = () => (this.flashFocus = 0);
+    this.startDemo = opts.demo ?? 'off';
+    this.store = new SettingsStore(opts.storage);
+    this.settings = this.store.load();
+    this.applySettings();
 
     this.tty.onData((d) => this.onData(d));
     this.tty.onResize(() => {
@@ -152,6 +173,7 @@ export class App {
 
   start(): void {
     this.tty.write(ENTER_APP);
+    this.setDemo(this.startDemo);
     this.renderer.invalidate();
     this.invalidate();
   }
@@ -185,7 +207,54 @@ export class App {
 
   private onData(data: string): void {
     for (const e of this.parser.feed(data)) this.dispatch(e);
+    this.saveSettings();
     this.invalidate();
+  }
+
+  // -------------------------------------------------------------------------
+  // Settings
+
+  private applySettings(): void {
+    const { flash, monitor } = this.settings;
+    const f = this.flash;
+    f.source.value = flash.source;
+    f.repo.setValue(flash.repo);
+    f.url.setValue(flash.url);
+    f.baud.index = Math.max(0, BAUD_RATES.indexOf(flash.baud as (typeof BAUD_RATES)[number]));
+    f.eraseAll.checked = flash.eraseAll;
+    f.verify.checked = flash.verify;
+    f.resetAfter.checked = flash.resetAfter;
+    this.applySerial(monitor);
+    if (this.monitor.colorize !== monitor.colorize) this.monitor.toggleColorize();
+  }
+
+  private applySerial(s: SerialSettings): void {
+    this.ports.baudRate = s.baud;
+    this.ports.format = s.format;
+    this.monitor.eol = s.eol;
+  }
+
+  private currentSerial(): SerialSettings {
+    return { baud: this.ports.baudRate, format: this.ports.format, eol: this.monitor.eol };
+  }
+
+  /** Snapshot the current state; written only if it changed. */
+  private saveSettings(): void {
+    const f = this.flash;
+    const s = this.settings;
+    s.flash = {
+      source: f.source.value,
+      repo: f.repo.value,
+      url: f.url.value,
+      baud: f.baud.value,
+      eraseAll: f.eraseAll.checked,
+      verify: f.verify.checked,
+      resetAfter: f.resetAfter.checked,
+    };
+    s.monitor = { ...this.currentSerial(), colorize: this.monitor.colorize };
+    const key = this.ports.port && portKey(this.ports.port);
+    if (key && this.ports.state === 'open') rememberPort(s.ports, key, this.currentSerial());
+    this.store.save(s);
   }
 
   private dispatch(e: InputEvent): void {
@@ -257,7 +326,7 @@ export class App {
         this.toggleFullscreen();
         return true;
       case 'D':
-        this.setDemo(this.demo === 'off' ? 'normal' : this.demo === 'normal' ? 'flood' : 'off');
+        this.toast('Dump (read) flash arrives with esptool-js in M1', 'info');
         return true;
       case '?':
         this.overlay = { kind: 'help', scroll: 0 };
@@ -311,7 +380,12 @@ export class App {
     this.send(e.name === 'enter' ? this.monitor.lineEnding.value : e.raw);
   }
 
-  private openMenu(title: string, items: MenuItem[], opts: MenuOptions = {}): Menu {
+  /**
+   * Opens a menu as the overlay. An action menu passes `from`, the key of the item to
+   * highlight first (e.g. the entry a submenu was opened from); a choice list starts on its
+   * checked value.
+   */
+  private openMenu(title: string, items: MenuItem[], opts: MenuOptions = {}, from?: string): Menu {
     const menu = new Menu(
       title,
       items,
@@ -320,6 +394,12 @@ export class App {
       },
       opts,
     );
+    if (from !== undefined) {
+      menu.selected = Math.max(
+        0,
+        menu.items.findIndex((i) => i.key === from),
+      );
+    }
     this.overlay = { kind: 'menu', menu };
     return menu;
   }
@@ -329,18 +409,16 @@ export class App {
     const open = this.ports.state === 'open';
     const m = this.monitor;
     const p = this.ports;
-    const menu = this.openMenu(
+    this.openMenu(
       'Monitor · Ctrl-A',
       [
         { key: 'r', label: 'Reset chip', action: () => this.resetChip() },
         { key: 'b', label: 'Boot (download) mode', action: () => this.bootMode() },
         { key: 'c', label: 'Clear', action: () => m.clear() },
-        { key: 's', label: `Baud: ${p.baudRate} ▸`, action: () => this.openBaudMenu() },
-        { key: 'f', label: `Format: ${p.format} ▸`, action: () => this.openFormatMenu() },
         {
-          key: 'e',
-          label: `Line ending: ${m.lineEnding.label} ▸`,
-          action: () => this.openEolMenu(),
+          key: 's',
+          label: `Settings: ${p.baudRate} ${p.format} ${m.lineEnding.label} ▸`,
+          action: () => this.openSettingsMenu(),
         },
         {
           key: 'h',
@@ -349,7 +427,7 @@ export class App {
           action: () => this.toggleColors(),
         },
         {
-          key: 'z',
+          key: 'f',
           label: 'Fullscreen pane',
           checked: this.zoomed,
           action: () => this.toggleFullscreen(),
@@ -358,19 +436,35 @@ export class App {
         { key: '?', label: 'Help', action: () => (this.overlay = { kind: 'help', scroll: 0 }) },
       ],
       { within: this.monitorArea() },
-    );
-    // An action menu, not a choice: start at the top (or where the submenu came from).
-    menu.selected = Math.max(
-      0,
-      menu.items.findIndex((i) => i.key === from),
+      from ?? 'r',
     );
   }
 
-  /** A submenu of the Ctrl+A menu: Back (or Esc) returns to it. */
-  private openSubmenu(title: string, from: string, items: MenuItem[]): void {
+  /** Serial settings: each opens a list; Back returns here, and from here to the menu. */
+  private openSettingsMenu(from?: string): void {
+    const m = this.monitor;
+    const p = this.ports;
+    this.openMenu(
+      'Settings',
+      [
+        { key: 'b', label: `Baud: ${p.baudRate} ▸`, action: () => this.openBaudMenu() },
+        { key: 'f', label: `Format: ${p.format} ▸`, action: () => this.openFormatMenu() },
+        {
+          key: 'e',
+          label: `Line ending: ${m.lineEnding.label} ▸`,
+          action: () => this.openEolMenu(),
+        },
+      ],
+      { within: this.monitorArea(), onBack: () => this.openMonitorMenu('s') },
+      from ?? 'b',
+    );
+  }
+
+  /** A list under Settings: Back (or Esc) returns to it. */
+  private openSettingsList(title: string, from: string, items: MenuItem[]): void {
     this.openMenu(title, items, {
       within: this.monitorArea(),
-      onBack: () => this.openMonitorMenu(from),
+      onBack: () => this.openSettingsMenu(from),
     });
   }
 
@@ -380,9 +474,9 @@ export class App {
   }
 
   private openBaudMenu(): void {
-    this.openSubmenu(
+    this.openSettingsList(
       'Baud rate',
-      's',
+      'b',
       MONITOR_BAUDS.map((b) => ({
         label: String(b),
         checked: b === this.ports.baudRate,
@@ -393,7 +487,7 @@ export class App {
 
   private openFormatMenu(): void {
     const p = this.ports;
-    this.openSubmenu(
+    this.openSettingsList(
       'Format',
       'f',
       FORMATS.map((f) => ({
@@ -409,7 +503,7 @@ export class App {
   }
 
   private openEolMenu(): void {
-    this.openSubmenu(
+    this.openSettingsList(
       'Line ending',
       'e',
       LINE_ENDINGS.map((l, i) => ({
@@ -535,12 +629,18 @@ export class App {
       .request()
       .then((port) => {
         record.result = 'granted';
+        // A device seen before gets the serial settings it had last time.
+        const key = portKey(port);
+        const known = key ? this.settings.ports[key] : undefined;
+        if (known) this.applySerial(known);
         return ports.open(port).then(() => {
           this.setDemo('off');
           this.monitor.clear();
           this.focusPane('monitor');
+          this.saveSettings();
           this.toast(
-            `Connected ${describePort(port)} @ ${ports.baudRate} (picked via ${record.trigger})`,
+            `Connected ${describePort(port)} @ ${ports.baudRate} ${ports.format}` +
+              (known ? ' (remembered settings)' : ''),
             'ok',
           );
         });
@@ -601,9 +701,7 @@ export class App {
         this.monitor.write(this.demoStream.next(perTick), this.invalidate);
     }, tick);
     this.toast(
-      mode === 'flood'
-        ? 'Demo stream: flood (~2 Mbaud). D again to stop'
-        : 'Demo stream on. D again for flood',
+      `Demo stream${mode === 'flood' ? ': flood (~2 Mbaud)' : ''}. Connecting a port stops it`,
       'info',
     );
   }
@@ -830,11 +928,7 @@ export class App {
       { key: '1/2', label: 'Pane' },
       { key: 'z', label: 'Fullscreen', action: () => this.toggleFullscreen() },
       { key: '⏎', label: 'Monitor', action: () => (this.focusPane('monitor'), this.enterLive()) },
-      {
-        key: 'D',
-        label: 'Demo',
-        action: () => this.setDemo(this.demo === 'off' ? 'normal' : 'off'),
-      },
+      { key: 'D', label: 'Dump' },
       { key: '?', label: 'Help', action: () => (this.overlay = { kind: 'help', scroll: 0 }) },
     ];
   }
@@ -897,4 +991,9 @@ export class App {
       screen.text(body.x + 22, y, d, { fg: theme.fg, bg: theme.inputBg }, body.w - 24);
     });
   }
+}
+
+/** Settings key for a USB serial device ("303a:1001"); null when the port has no USB ids. */
+function portKey(port: SerialPort): string | null {
+  return port.getInfo().usbVendorId === undefined ? null : describePort(port);
 }

@@ -102,7 +102,6 @@ export class MonitorPane implements Focusable {
         ['', 'No device connected.'],
         ['', ''],
         ['c', 'connect a serial port'],
-        ['D', 'start a demo stream'],
       ];
       const top = r.y + Math.max(0, Math.floor((r.h - lines.length) / 2));
       const left = r.x + Math.max(1, Math.floor((r.w - 26) / 2));
