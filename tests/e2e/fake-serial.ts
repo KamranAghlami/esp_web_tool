@@ -12,7 +12,9 @@ export function installFakeSerial(): void {
     __serialRequests: { activation: boolean }[];
     __serialEmit: (s: string) => void;
     __serialSignals: string[];
+    __serialOpen: Record<string, unknown>[];
   };
+  w.__serialOpen = [];
   w.__serialWritten = '';
   w.__serialSignals = [];
   w.__serialRequests = [];
@@ -26,7 +28,8 @@ export function installFakeSerial(): void {
       return { usbVendorId: 0x303a, usbProductId: 0x1001 };
     }
 
-    async open(_opts: { baudRate: number }) {
+    async open(opts: Record<string, unknown>) {
+      w.__serialOpen.push(opts);
       this.readable = new ReadableStream<Uint8Array>({
         start: (c) => {
           this.ctrl = c;

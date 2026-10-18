@@ -1,5 +1,12 @@
 import { BOOT_BANNER, DemoStream } from '../monitor/demo';
-import { describePort, errorText, PortManager, type PortState } from '../serial/port-manager';
+import {
+  describePort,
+  errorText,
+  describeFormat,
+  FORMATS,
+  PortManager,
+  type PortState,
+} from '../serial/port-manager';
 import { InputParser, type InputEvent, type KeyEvent, type PasteEvent } from '../tty/input';
 import type { Tty } from '../tty/tty';
 import { HitMap, type Ctx } from '../tui/context';
@@ -9,13 +16,13 @@ import { contains, Screen, type Rect } from '../tui/screen';
 import { Attr, type Style } from '../tui/style';
 import { darkTheme, type Theme } from '../tui/theme';
 import {
-  type Anchor,
   dialog,
   type Focusable,
   keyBar,
   type KeyHint,
   Menu,
   type MenuItem,
+  type MenuOptions,
   spinner,
 } from '../tui/widgets';
 import { stringWidth, truncate } from '../tui/width';
@@ -76,8 +83,6 @@ export class App {
   private zoomed = false;
   private overlay: Overlay | null = null;
   private toasts: Toast[] = [];
-  /** Where the monitor pane was last drawn, to anchor its menu. */
-  private monRect: Rect | null = null;
 
   private parser = new InputParser();
   private renderer = new Renderer();
@@ -122,7 +127,7 @@ export class App {
           checked: i === this.flash.baud.index,
           action: () => (this.flash.baud.index = i),
         })),
-        anchor,
+        { anchor },
       );
     this.ports = new PortManager({
       onData: (bytes) => this.monitor.write(bytes, () => this.invalidate()),
@@ -241,7 +246,7 @@ export class App {
         this.focusPane('monitor');
         return true;
       case 'z':
-        this.zoomed = !this.zoomed;
+        this.toggleFullscreen();
         return true;
       case 'D':
         this.setDemo(this.demo === 'off' ? 'normal' : this.demo === 'normal' ? 'flood' : 'off');
@@ -298,75 +303,101 @@ export class App {
     this.send(e.name === 'enter' ? this.monitor.lineEnding.value : e.raw);
   }
 
-  private openMenu(title: string, items: MenuItem[], anchor: Anchor): Menu {
-    const menu = new Menu(title, items, anchor, () => {
-      if (this.overlay?.kind === 'menu' && this.overlay.menu === menu) this.overlay = null;
-    });
+  private openMenu(title: string, items: MenuItem[], opts: MenuOptions = {}): Menu {
+    const menu = new Menu(
+      title,
+      items,
+      () => {
+        if (this.overlay?.kind === 'menu' && this.overlay.menu === menu) this.overlay = null;
+      },
+      opts,
+    );
     this.overlay = { kind: 'menu', menu };
     return menu;
   }
 
-  /** The Ctrl+A menu: opens above the bottom-left corner of the monitor pane. */
-  private openMonitorMenu(): void {
+  /** The Ctrl+A menu; `from` re-selects the item a submenu was opened from. */
+  private openMonitorMenu(from?: string): void {
     const open = this.ports.state === 'open';
     const m = this.monitor;
-    const r = this.monRect;
-    const menu = this.openMenu(
-      'Monitor · Ctrl-A',
-      [
-        { key: 'r', label: 'Reset chip', action: () => this.resetChip() },
-        { key: 'b', label: 'Boot (download) mode', action: () => this.bootMode() },
-        { key: 'c', label: 'Clear', action: () => m.clear() },
-        {
-          key: 'e',
-          label: `Line ending: ${m.lineEnding.label} ▸`,
-          action: () => this.openEolMenu(),
-        },
-        { key: 's', label: `Baud: ${this.ports.baudRate} ▸`, action: () => this.openBaudMenu() },
-        { key: '+', label: 'Baud up', action: () => this.stepBaud(1) },
-        { key: '-', label: 'Baud down', action: () => this.stepBaud(-1) },
-        {
-          key: 'h',
-          label: 'Log level colors',
-          checked: m.colorize,
-          action: () => this.toggleColors(),
-        },
-        {
-          key: 'z',
-          label: 'Zoom pane',
-          checked: this.zoomed,
-          action: () => (this.zoomed = !this.zoomed),
-        },
-        { key: '^A', label: 'Send Ctrl-A', action: () => open && this.send('\x01') },
-        { key: '?', label: 'Help', action: () => (this.overlay = { kind: 'help', scroll: 0 }) },
-      ],
-      { x: r ? r.x : 1, y: this.tty.rows - 3 },
+    const p = this.ports;
+    const menu = this.openMenu('Monitor · Ctrl-A', [
+      { key: 'r', label: 'Reset chip', action: () => this.resetChip() },
+      { key: 'b', label: 'Boot (download) mode', action: () => this.bootMode() },
+      { key: 'c', label: 'Clear', action: () => m.clear() },
+      { key: 's', label: `Baud: ${p.baudRate} ▸`, action: () => this.openBaudMenu() },
+      { key: 'f', label: `Format: ${p.format} ▸`, action: () => this.openFormatMenu() },
+      { key: 'e', label: `Line ending: ${m.lineEnding.label} ▸`, action: () => this.openEolMenu() },
+      {
+        key: 'h',
+        label: 'Log level colors',
+        checked: m.colorize,
+        action: () => this.toggleColors(),
+      },
+      {
+        key: 'z',
+        label: 'Fullscreen pane',
+        checked: this.zoomed,
+        action: () => this.toggleFullscreen(),
+      },
+      { key: '^A', label: 'Send Ctrl-A', action: () => open && this.send('\x01') },
+      { key: '?', label: 'Help', action: () => (this.overlay = { kind: 'help', scroll: 0 }) },
+    ]);
+    // An action menu, not a choice: start at the top (or where the submenu came from).
+    menu.selected = Math.max(
+      0,
+      menu.items.findIndex((i) => i.key === from),
     );
-    menu.selected = 0; // an action menu, not a choice: start at the top
   }
 
-  private openBaudMenu(anchor?: Anchor): void {
-    this.openMenu(
-      'Monitor baud',
+  /** A submenu of the Ctrl+A menu: Back (or Esc) returns to it. */
+  private openSubmenu(title: string, from: string, items: MenuItem[]): void {
+    this.openMenu(title, items, { onBack: () => this.openMonitorMenu(from) });
+  }
+
+  private openBaudMenu(): void {
+    this.openSubmenu(
+      'Baud rate',
+      's',
       MONITOR_BAUDS.map((b) => ({
         label: String(b),
         checked: b === this.ports.baudRate,
         action: () => this.setMonitorBaud(b),
       })),
-      anchor ?? { x: this.monRect?.x ?? 1, y: this.tty.rows - 3 },
     );
   }
 
-  private openEolMenu(anchor?: Anchor): void {
-    this.openMenu(
+  private openFormatMenu(): void {
+    const p = this.ports;
+    this.openSubmenu(
+      'Format',
+      'f',
+      FORMATS.map((f) => ({
+        label: describeFormat(f),
+        checked: f === p.format,
+        action: () => {
+          if (p.state === 'open')
+            void p.setFormat(f).then(() => this.toast(`Format: ${f}`, 'info'));
+          else p.format = f;
+        },
+      })),
+    );
+  }
+
+  private openEolMenu(): void {
+    this.openSubmenu(
       'Line ending',
+      'e',
       LINE_ENDINGS.map((l, i) => ({
         label: l.label,
         checked: i === this.monitor.eol,
         action: () => (this.monitor.eol = i),
       })),
-      anchor ?? { x: this.monRect?.x ?? 1, y: this.tty.rows - 3 },
     );
+  }
+
+  private toggleFullscreen(): void {
+    this.zoomed = !this.zoomed;
   }
 
   private resetChip(): void {
@@ -387,11 +418,6 @@ export class App {
   private toggleColors(): void {
     this.monitor.toggleColorize();
     this.toast(`Log level colors: ${this.monitor.colorize ? 'on' : 'off'}`, 'info');
-  }
-
-  private stepBaud(d: number): void {
-    const i = MONITOR_BAUDS.indexOf(this.ports.baudRate);
-    this.setMonitorBaud(MONITOR_BAUDS[Math.max(0, Math.min(MONITOR_BAUDS.length - 1, i + d))]!);
   }
 
   private setMonitorBaud(baud: number): void {
@@ -657,11 +683,10 @@ export class App {
         this.flash.render(ctx, flashRect!, this.pane === 'flash' ? focus : null),
       );
     }
-    this.monRect = monRect;
     if (monRect) {
       const live = this.monitor.live;
-      const title = live ? 'Monitor ● LIVE' : 'Monitor';
-      const end = this.paneTitle(
+      const title = 'Monitor';
+      this.paneTitle(
         ctx,
         monRect.x,
         title,
@@ -669,12 +694,6 @@ export class App {
         '2',
         live ? theme.borderLive : undefined,
       );
-      // Clickable settings in the pane header: ` 115200▾ 8N1 · LF▾ `.
-      let x = screen.text(end + 1, 2, ' ', {});
-      x = this.dropdown(ctx, x, String(this.ports.baudRate), (a) => this.openBaudMenu(a));
-      x = screen.text(x, 2, ' 8N1 · ', { fg: theme.dim });
-      x = this.dropdown(ctx, x, this.monitor.lineEnding.label, (a) => this.openEolMenu(a));
-      screen.text(x, 2, ' ', {});
       ctx.hits.add(monRect, (e) => e.action === 'down' && this.focusPane('monitor'));
       screen.withClip(monRect, () => this.monitor.render(ctx, monRect!));
     }
@@ -684,28 +703,16 @@ export class App {
     if (this.overlay) this.drawOverlay(ctx);
   }
 
-  /** Underlined text that opens `url` when clicked, set into a border with a space each side. */
+  /** Text that opens `url` when clicked, set into a border with a space each side. */
   private link(ctx: Ctx, x: number, y: number, text: string, url: string, style: Style): void {
     const { screen } = ctx;
     screen.text(x, y, ' ', {});
-    const end = screen.text(x + 1, y, text, {
-      ...style,
-      attrs: (style.attrs ?? 0) | Attr.Underline,
-    });
+    const end = screen.text(x + 1, y, text, style);
     screen.text(end, y, ' ', {});
     ctx.hits.add(
       { x: x + 1, y, w: end - x - 1, h: 1 },
       (e) => e.action === 'down' && this.openUrl(url),
     );
-  }
-
-  /** `value▾` that opens a menu below itself when clicked; returns the column after it. */
-  private dropdown(ctx: Ctx, x: number, value: string, open: (a: Anchor) => void): number {
-    const { screen, theme } = ctx;
-    let end = screen.text(x, 2, value, { fg: theme.fg });
-    end = screen.text(end, 2, '▾', { fg: theme.dim });
-    ctx.hits.add({ x, y: 2, w: end - x, h: 1 }, (e) => e.action === 'down' && open({ x, y: 2 }));
-    return end;
   }
 
   /** Writes `─ 1 Flash ─` into the pane header row; returns the column after it. */
@@ -749,7 +756,9 @@ export class App {
         break;
       case 'open':
         x = screen.text(x, r.y, '● ', { fg: theme.ok });
-        x = screen.text(x, r.y, `${describePort(p.port!)} @ ${p.baudRate}`, { fg: theme.fg });
+        x = screen.text(x, r.y, `${describePort(p.port!)} @ ${p.baudRate} ${p.format}`, {
+          fg: theme.fg,
+        });
         break;
       case 'error':
         x = screen.text(x, r.y, '✗ error', { fg: theme.error });
@@ -768,10 +777,11 @@ export class App {
 
   private hints(): KeyHint[] {
     if (this.overlay?.kind === 'menu') {
+      const menu = this.overlay.menu;
       return [
         { key: '↑↓', label: 'Move' },
         { key: '⏎', label: 'Select' },
-        { key: 'Esc', label: 'Close', action: () => (this.overlay = null) },
+        { key: 'Esc', label: menu.isSubmenu ? 'Back' : 'Close', action: () => menu.back() },
       ];
     }
     if (this.monitor.live) {
@@ -789,7 +799,7 @@ export class App {
       { key: 's', label: 'Source', action: () => this.flash.source.cycle() },
       { key: 'Tab', label: 'Focus' },
       { key: '1/2', label: 'Pane' },
-      { key: 'z', label: 'Zoom', action: () => (this.zoomed = !this.zoomed) },
+      { key: 'z', label: 'Fullscreen', action: () => this.toggleFullscreen() },
       { key: '⏎', label: 'Monitor', action: () => (this.focusPane('monitor'), this.enterLive()) },
       {
         key: 'D',

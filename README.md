@@ -11,7 +11,7 @@ Flash and monitor Espressif chips from your browser, in a full-screen terminal U
 ## Try it
 
 - `c` connect a serial port, `Enter` on the Monitor pane to type to the device, `Ctrl-]` to leave
-- `Ctrl-A` then `r` resets the chip, `b` enters boot mode, `+`/`-` change baud
+- `Ctrl-A` opens the monitor menu: `r` reset, `b` boot mode, `s` baud, `f` format (8N1…), `e` line ending
 - `D` starts a demo log stream if you have no device at hand
 - `?` shows every key
 

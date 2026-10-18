@@ -23,12 +23,33 @@ export function describePort(port: SerialPort): string {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** Frame formats offered in the monitor menu: data bits, parity (N/E/O), stop bits. */
+export const FORMATS = ['8N1', '8E1', '8O1', '8N2', '7E1', '7O1', '7N1'] as const;
+export type Format = (typeof FORMATS)[number];
+
+const PARITY = { N: 'none', E: 'even', O: 'odd' } as const;
+
+export function formatOptions(f: Format): Pick<SerialOptions, 'dataBits' | 'parity' | 'stopBits'> {
+  return {
+    dataBits: f[0] === '7' ? 7 : 8,
+    parity: PARITY[f[1] as keyof typeof PARITY],
+    stopBits: f[2] === '2' ? 2 : 1,
+  };
+}
+
+/** `8N1   8 data, no parity, 1 stop` (for menus). */
+export function describeFormat(f: Format): string {
+  const { dataBits, parity, stopBits } = formatOptions(f);
+  return `${f}   ${dataBits} data, ${parity === 'none' ? 'no' : parity} parity, ${stopBits} stop`;
+}
+
 const ESPRESSIF_VID = 0x303a;
 const USB_JTAG_PID = 0x1001;
 
 export class PortManager {
   port: SerialPort | null = null;
   baudRate = 115200;
+  format: Format = '8N1';
   state: PortState = serialSupported() ? 'none' : 'unsupported';
   /** Bytes written to the device so far (for the tx rate). */
   bytesOut = 0;
@@ -67,7 +88,7 @@ export class PortManager {
     this.baudRate = baudRate;
     this.setState('opening');
     try {
-      await port.open({ baudRate, bufferSize: 64 * 1024 });
+      await port.open({ baudRate, bufferSize: 64 * 1024, ...formatOptions(this.format) });
     } catch (err) {
       this.port = null;
       this.setState('error', errorText(err));
@@ -121,6 +142,12 @@ export class PortManager {
     const port = this.port;
     this.baudRate = baudRate;
     if (port) await this.open(port, baudRate);
+  }
+
+  async setFormat(format: Format): Promise<void> {
+    const port = this.port;
+    this.format = format;
+    if (port) await this.open(port, this.baudRate);
   }
 
   async write(data: string | Uint8Array): Promise<void> {

@@ -74,6 +74,7 @@ async function find(page: Page, text: string): Promise<{ col: number; row: numbe
 }
 
 async function clickText(page: Page, info: ReadyInfo, text: string): Promise<void> {
+  await expectOnScreen(page, text);
   const { col, row } = await find(page, text);
   const p = cellCenter(info, col, row);
   await page.mouse.click(p.x, p.y);
@@ -166,19 +167,31 @@ test.describe('app', () => {
     await expectOnScreen(page, 'Help · Esc to close');
   });
 
-  test('baud and line ending are picked from dropdowns', async ({ page }) => {
-    await clickText(page, info, '115200▾');
-    await expectOnScreen(page, 'Monitor baud');
-    await clickText(page, info, '460800 ');
-    await expectOnScreen(page, '460800▾');
-    await clickText(page, info, 'LF▾');
-    await clickText(page, info, 'CRLF');
-    await expectOnScreen(page, 'CRLF▾');
+  test('baud and data format are picked from Ctrl+A submenus with a way back', async ({ page }) => {
+    await page.keyboard.press('2');
+    await page.keyboard.press('Control+a');
+    await expectOnScreen(page, 'Baud: 115200 ▸');
+    await page.keyboard.press('s');
+    await expectOnScreen(page, '‹ Back');
+    await page.keyboard.press('Escape'); // back, not closed
+    await expectOnScreen(page, 'Monitor · Ctrl-A');
+    await page.keyboard.press('s');
+    await clickText(page, info, '460800');
+    await expect.poll(async () => (await screenText(page)).join()).not.toContain('‹ Back');
+    await page.keyboard.press('Control+a');
+    await page.keyboard.press('f');
+    await clickText(page, info, '8E1');
+    await page.keyboard.press('c');
+    await expectOnScreen(page, '@ 460800 8E1');
+    expect(await page.evaluate(() => (window as any).__serialOpen.at(-1))).toMatchObject({
+      baudRate: 460800,
+      dataBits: 8,
+      parity: 'even',
+      stopBits: 1,
+    });
     // The flash pane's ‹ value › opens a list too.
     await clickText(page, info, '921600');
     await expectOnScreen(page, 'Flash baud');
-    await page.keyboard.press('Escape');
-    await expect.poll(async () => (await screenText(page)).join()).not.toContain('Flash baud');
   });
 
   test('the title and version open the repository and its releases', async ({ page }) => {

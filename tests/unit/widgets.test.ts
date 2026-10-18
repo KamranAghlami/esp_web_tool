@@ -107,8 +107,8 @@ describe('Menu', () => {
         { key: 'a', label: 'Alpha', action: () => log.push('alpha') },
         { key: '^A', label: 'Ctrl thing', checked: true, action: () => log.push('ctrl') },
       ],
-      { x: 30, y: 0 },
       () => log.push('close'),
+      { anchor: { x: 30, y: 0 } },
     );
     const c = ctx();
     menu.render(c);
@@ -121,6 +121,25 @@ describe('Menu', () => {
     const y = rows.findIndex((r) => r.includes('Alpha'));
     c.hits.dispatch(m('down', rows[y]!.indexOf('Alpha'), y));
     expect(log).toEqual(['close', 'ctrl', 'close', 'alpha']);
+  });
+});
+
+describe('Menu as a submenu', () => {
+  it('has a Back row, and Esc goes back instead of closing', () => {
+    const log: string[] = [];
+    const menu = new Menu(
+      'Sub',
+      [{ label: 'One', checked: true, action: () => log.push('one') }],
+      () => log.push('close'),
+      { onBack: () => log.push('back') },
+    );
+    const c = ctx();
+    menu.render(c);
+    const text = Array.from({ length: 10 }, (_, y) => c.screen.rowText(y)).join('\n');
+    expect(text).toContain('‹ Back');
+    expect(menu.selected).toBe(1); // on the checked value, not on Back
+    menu.handleKey(k('escape'));
+    expect(log).toEqual(['close', 'back']);
   });
 });
 

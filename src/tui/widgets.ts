@@ -440,20 +440,31 @@ export interface MenuItem {
   action: () => void;
 }
 
-/** Modal pop-up list, used for the Ctrl+A menu and for dropdowns such as baud rates. */
+export interface MenuOptions {
+  /** Open below (or above) this cell, like a dropdown; centered on screen without one. */
+  anchor?: Anchor;
+  /** Makes this a submenu: adds a `‹ Back` row, and Esc, ← and Backspace go back. */
+  onBack?: () => void;
+}
+
+/** Modal pop-up list, used for the Ctrl+A menu, its submenus and dropdowns. */
 export class Menu {
   selected: number;
+  readonly items: MenuItem[];
   private scroll = 0;
 
   constructor(
     public title: string,
-    public items: MenuItem[],
-    public anchor: Anchor,
+    items: MenuItem[],
     private onClose: () => void,
+    private opts: MenuOptions = {},
   ) {
+    const back = opts.onBack;
+    this.items = back ? [{ label: '‹ Back', action: back }, ...items] : items;
+    // A choice list starts on the current value, an action menu at the top.
     this.selected = Math.max(
       0,
-      items.findIndex((i) => i.checked),
+      this.items.findIndex((i) => i.checked),
     );
   }
 
@@ -467,10 +478,18 @@ export class Menu {
       Math.max(stringWidth(this.title) + 6, 4 + 2 + (keyW ? keyW + 2 : 0) + labelW),
     );
     const h = Math.min(this.items.length + 2, screen.rows);
-    const x = Math.max(0, Math.min(this.anchor.x, screen.cols - w));
-    const below = this.anchor.y + 1;
-    const y = below + h <= screen.rows ? below : Math.max(0, this.anchor.y - h);
-    const r = { x, y, w, h };
+    const full = { x: 0, y: 0, w: screen.cols, h: screen.rows };
+    let r = centered(full, w, h);
+    const a = this.opts.anchor;
+    if (a) {
+      const below = a.y + 1;
+      r = {
+        x: Math.max(0, Math.min(a.x, screen.cols - w)),
+        y: below + h <= screen.rows ? below : Math.max(0, a.y - h),
+        w,
+        h,
+      };
+    }
 
     ctx.hits.add({ x: 0, y: 0, w: screen.cols, h: screen.rows }, (e) => {
       if (e.action === 'down') this.onClose();
@@ -514,6 +533,16 @@ export class Menu {
     }
   }
 
+  get isSubmenu(): boolean {
+    return this.opts.onBack !== undefined;
+  }
+
+  /** Back to the parent menu, or close a top-level menu. */
+  back(): void {
+    if (this.isSubmenu) this.choose(0);
+    else this.onClose();
+  }
+
   private handleMouse(e: MouseEvent): void {
     if (e.action === 'wheelup') this.move(-1);
     else if (e.action === 'wheeldown') this.move(1);
@@ -554,7 +583,9 @@ export class Menu {
         return true;
       case 'escape':
       case 'q':
-        this.onClose();
+      case 'left':
+      case 'backspace':
+        if (this.isSubmenu || name === 'escape' || name === 'q') this.back();
         return true;
     }
     const i = this.items.findIndex((it) => it.key === name);

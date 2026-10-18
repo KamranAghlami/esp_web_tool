@@ -82,7 +82,7 @@ Target feel: **running a CLI tool through ttyd**. The page is one full-window xt
 - **Input**: one parser for xterm's `onData` stream: CSI/SS3 keys, Alt as an ESC prefix, bracketed paste (`?2004`), SGR mouse (`?1000;1006`: click, wheel, drag). Keys and mouse reach the app as a terminal app would get them, which is what makes it feel real.
 - **Layout**: nested horizontal/vertical splits with fixed/flex sizes, recomputed on resize. Three size classes: **wide** (≥ 120 cols, split panes), **normal** (≥ 80×24, one pane at a time) and **compact** (≥ 40×14, phones; §4.1). Only below 40×14 show a "terminal too small" notice, as real TUIs do. M0 still has the old 80×24 minimum, which is why an iPhone 14 Pro (about 48 cols in portrait) shows the notice.
 - **Widgets** (`src/tui/`): Box (title in border), Text, List, Table, TextInput, Select (popup list), Checkbox/Radio, ProgressBar, Dialog/Confirm, Toast, StatusBar, KeyBar, ScrollView, TermPane (the headless blit).
-- **Monitor pane = a terminal inside the terminal.** Device bytes go into an `@xterm/headless` instance sized to the pane. That instance parses ANSI, cursor moves and clears just like a real terminal. Each frame we copy its visible buffer cells (`IBufferCell` gives char, colors, attributes) into the pane region. **Zoom** (`z`) makes the pane full screen. We still blit rather than pass bytes straight through, so the key bar and status line stay.
+- **Monitor pane = a terminal inside the terminal.** Device bytes go into an `@xterm/headless` instance sized to the pane. That instance parses ANSI, cursor moves and clears just like a real terminal. Each frame we copy its visible buffer cells (`IBufferCell` gives char, colors, attributes) into the pane region. **Fullscreen** (`z`) makes the focused pane fill the window. We still blit rather than pass bytes straight through, so the key bar and status line stay.
 - **Width**: use the `unicode11` addon, and use the same width table in `Screen`, so our layout and xterm agree. The UI's own strings use no emoji or ambiguous-width glyphs. Box drawing, block elements and `●▶✓✗` are fine.
 - **Look**: page background = terminal background, no margins, terminal-style window title (we write OSC 0/2 and mirror it to `document.title`). Font: self-hosted monospace with full box-drawing coverage (JetBrains Mono or Iosevka). xterm's `customGlyphs` draws box and block characters pixel-perfect.
 - **Text selection**: as in terminals: with mouse reporting on, **Shift+drag** selects. `Ctrl+Shift+C` / `Ctrl+Shift+V` copy and paste.
@@ -154,7 +154,7 @@ interface FlashPlan {
 │ Baud [921600▾] Erase all [ ] Verify [x] Reset after [x]                                       │
 │ my-fw.bin   ███████████████▌               52%  612 KiB/s                                     │
 ├─────────────────────────────────────────────────┴──────────────────────────────────────────────┤
-│ c Connect  f Flash  E Erase  1/2 Pane  z Zoom  ^A Monitor menu  ^] Leave monitor  ? Help  │
+│ c Connect  f Flash  E Erase  1/2 Pane  z Fullscreen  ^A Monitor menu  ^] Leave monitor  ? Help  │
 └────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -207,8 +207,8 @@ A browser tab is a hostile terminal. Chrome **does not let pages intercept** `Ct
 | `a` / `d` / `e` / `o` | Parts table: add file / delete row / edit offset / open folder (TUI file browser) |
 | `Enter` on the Monitor pane | Enter the monitor: **from here every key goes to the device** |
 | `Ctrl+]` | Leave the monitor (back to hotkeys) |
-| `Ctrl+A` | Monitor menu, a pop-up that lists its keys and is clickable (live, or with the Monitor pane focused): `r` reset, `b` boot mode, `c` clear, `e` line ending ▸, `s` baud ▸, `+`/`-` baud up/down, `h` log-level colors, `z` zoom, `Ctrl+A` send a literal `Ctrl+A`, `?` help; later: `d` DTR, `t` timestamps, `l` save log |
-| `z` | Zoom / unzoom the focused pane |
+| `Ctrl+A` | Monitor menu: a centered pop-up that lists its keys and is clickable (live, or with the Monitor pane focused). `r` reset, `b` boot mode, `c` clear, `s` baud ▸, `f` format (8N1, 8E1, 7E1…) ▸, `e` line ending ▸, `h` log-level colors, `z` fullscreen, `Ctrl+A` send a literal `Ctrl+A`, `?` help; later: `d` DTR, `t` timestamps, `l` save log. Submenus have a `‹ Back` row; Esc, ← and Backspace go back. Current values show in the menu labels and the status line (`303a:1001 @ 115200 8N1`), not in the pane header. |
+| `z` | Fullscreen the focused pane; again to restore |
 | `D` | Demo log stream: off → normal → flood (about 2 Mbaud); for trying the monitor without a device |
 | `?` | Help overlay listing all keys |
 | `Esc` | Close dialog or overlay, cancel the current input |
@@ -216,8 +216,8 @@ A browser tab is a hostile terminal. Chrome **does not let pages intercept** `Ct
 Every action can also be done with the mouse:
 - Click to focus or select. The wheel scrolls lists, the monitor and the help.
 - Key-bar entries are clickable.
-- Settings shown as `value▾` (monitor baud and line ending in the pane header) open a dropdown menu. A `‹ value ›` picker steps with its arrows and opens the full list when you click the value.
-- The title links to the repository and the version to its releases. Links are underlined and opened with `window.open` from the click.
+- A `‹ value ›` picker steps with its arrows and opens the full list as a dropdown when you click the value.
+- The title links to the repository and the version to its releases (opened with `window.open` from the click; not underlined, to keep the frame clean).
 - **Selection**: dragging in the monitor selects text tmux-style. The selection is anchored to the buffer (an xterm marker), so it stays on the same text while output streams in. Dragging past the edge scrolls. It is copied to the clipboard on release, through the Clipboard API with an `execCommand('copy')` fallback. Shift-drag (Option-drag on macOS) is xterm's own screen selection, for anything else on screen.
 
 ### Visual style
@@ -370,6 +370,7 @@ So a generic "any public repo" flasher needs a proxy. For a firmware repo that c
 - **Input modes**: *raw* (default; each keystroke is sent, which suits REPLs like MicroPython) or *line* (a local edit line, sent on Enter).
 - Line ending on send: `LF` / `CR` / `CRLF` / none.
 - Baud presets from 9600 to 2000000, plus a custom value. Changing the baud reopens the port.
+- Frame format: 8N1 by default; 8E1, 8O1, 8N2, 7E1, 7O1, 7N1 from the menu (Web Serial `dataBits`/`parity`/`stopBits`). Changing it reopens the port.
 - Timestamps: an optional prefix per received line.
 - DTR/RTS toggles, **Reset** (EN pulse), **Boot** (enter the download mode sequence). The sequences follow esptool and depend on the port:
   - USB-UART bridge (CP210x, CH340, FTDI…): the classic auto-reset circuit. `(DTR,RTS)` = `(0,1)` 100 ms → `(1,0)` 50 ms → `(0,0)`.
@@ -467,6 +468,7 @@ Settings (`localStorage`, best effort): theme, default bauds, auto-monitor, time
   - Ctrl+A gave no visible menu; it is now a pop-up with `?` for help.
   - Shift-drag selection did not do what was wanted. xterm's selection is screen-fixed, so it spans both panes and stays put while the log scrolls; on macOS it needs Option. Added buffer-anchored drag selection in the monitor.
   - Added: mouse wheel in the help, the title and version as links, a tx rate next to rx, and clickable dropdowns for baud and line ending.
+- **Third pass (2026-10-18)**: the frame format is configurable (was fixed 8N1). The pane header lost "● LIVE" (the key bar says it) and the baud/line-ending dropdowns (they are in the menu). Baud +/- removed. Zoom renamed Fullscreen. Menus are centered and submenus have Back. Links are no longer underlined.
 
 ## 15. Open questions
 
