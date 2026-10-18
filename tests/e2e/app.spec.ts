@@ -347,6 +347,21 @@ test.describe('app', () => {
     await expectOnScreen(page, 'Flash (simulated)');
   });
 
+  test('draws on the alternate screen, which survives resizes without drifting', async ({
+    page,
+  }) => {
+    const state = () =>
+      page.evaluate(() => {
+        const b = (window as any).__espwt.term.buffer.active;
+        return { type: b.type, viewportY: b.viewportY, baseY: b.baseY };
+      });
+    expect(await state()).toEqual({ type: 'alternate', viewportY: 0, baseY: 0 });
+    await page.setViewportSize({ width: 760, height: 430 });
+    await page.setViewportSize({ width: 1600, height: 900 });
+    await expect.poll(state).toEqual({ type: 'alternate', viewportY: 0, baseY: 0 });
+    expect((await screenText(page))[0]).toContain('ESP Web Tool');
+  });
+
   test('help overlay opens and closes', async ({ page }) => {
     await page.keyboard.press('?');
     await expectOnScreen(page, 'Help · Esc to close');

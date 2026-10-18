@@ -496,6 +496,7 @@ Settings live in `localStorage`, so every browser (each computer or phone) keeps
   - Toasts became bottom-bar messages.
   - `f` is Fullscreen everywhere, `F` is Flash (capitals = cannot be undone), and Ctrl+A `C` clears.
 - **Seventh pass (2026-10-18)**: everything (flash and monitor) is remembered as "last used" and per USB device. Picked files can't be kept.
+- **DevTools artifact (2026-10-18)**: after opening and closing DevTools in Chrome on macOS, the frame sat one row low with a stale border line on top. The app had been drawing on the normal screen since the fake shell was removed. xterm reflows the normal screen on resize, and its view can stop short of the bottom. Fixed by going back to the alternate screen (`?1049h`: no scrollback, no reflow) and scrolling to the bottom after every refit.
 
 ## 15. Open questions
 

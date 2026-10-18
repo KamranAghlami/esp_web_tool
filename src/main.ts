@@ -122,7 +122,11 @@ async function main(): Promise<void> {
 
   term.onTitleChange((t) => (document.title = t));
 
-  const refit = () => fit.fit();
+  const refit = () => {
+    fit.fit();
+    // The app draws whole frames; never leave the view scrolled away from them.
+    term.scrollToBottom();
+  };
   new ResizeObserver(refit).observe(host);
   // A face that finishes loading later (first visit, empty cache) can change the cell size.
   document.fonts.addEventListener('loadingdone', refit);

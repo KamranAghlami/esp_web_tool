@@ -46,8 +46,11 @@ export const REPO_URL = 'https://github.com/KamranAghlami/esp_web_tool';
 /** Monitor baud choices: slow ROM/legacy rates, then the flasher's. */
 const MONITOR_BAUDS = [9600, 19200, 38400, 57600, 74880, ...BAUD_RATES];
 
-/** Mouse tracking (button + drag, SGR encoding), bracketed paste, window title. */
-const ENTER_APP = '\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b]0;ESP Web Tool\x07';
+/**
+ * Alternate screen (like vim or htop: no scrollback, no reflow on resize, so the frame can't
+ * drift), mouse tracking (button + drag, SGR encoding), bracketed paste, window title.
+ */
+const ENTER_APP = '\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b]0;ESP Web Tool\x07';
 
 type MessageKind = 'info' | 'ok' | 'warn' | 'error';
 /** A message shown in the bottom bar in place of the key hints, until it expires or a key. */
