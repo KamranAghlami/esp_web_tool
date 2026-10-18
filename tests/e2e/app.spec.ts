@@ -91,27 +91,51 @@ test.describe('app', () => {
     await expect.poll(async () => (await screenText(page)).join('\n')).not.toContain('LIVE');
   });
 
-  test('device ANSI colors reach the screen', async ({ page }) => {
+  test('device colors and plain ESP-IDF log levels are colored', async ({ page }) => {
     await page.keyboard.press('c');
     await expectOnScreen(page, 'hello from fake port');
     await page.evaluate(() =>
-      (window as any).__serialEmit('\x1b[0;31mE (1) boom: red line\x1b[0m\r\n'),
+      (window as any).__serialEmit(
+        '\x1b[0;31mE (1) boom: device red\x1b[0m\r\nE (2) boom: plain red\r\n' +
+          'W (3) hmm: plain yellow\r\nnot a log line\r\n',
+      ),
     );
-    await expectOnScreen(page, 'E (1) boom: red line');
-    const isRed = await page.evaluate(() => {
-      const term = (window as any).__espwt.term;
-      const b = term.buffer.active;
-      for (let y = 0; y < term.rows; y++) {
-        const line = b.getLine(y);
-        const x = line.translateToString(true).indexOf('E (1) boom');
-        if (x >= 0) {
-          const cell = line.getCell(x);
-          return cell.isFgPalette() && cell.getFgColor() === 1;
+    await expectOnScreen(page, 'not a log line');
+    const fgOf = (text: string) =>
+      page.evaluate((text) => {
+        const term = (window as any).__espwt.term;
+        const b = term.buffer.active;
+        for (let y = 0; y < term.rows; y++) {
+          const line = b.getLine(y);
+          const x = line.translateToString(true).indexOf(text);
+          if (x >= 0) {
+            const cell = line.getCell(x);
+            return cell.isFgDefault() ? 'default' : cell.getFgColor();
+          }
         }
-      }
-      return false;
-    });
-    expect(isRed).toBe(true);
+        return 'missing';
+      }, text);
+    expect(await fgOf('E (1) boom')).toBe(1);
+    expect(await fgOf('E (2) boom')).toBe(1);
+    expect(await fgOf('W (3) hmm')).toBe(3);
+    expect(await fgOf('not a log line')).toBe('default');
+  });
+
+  test('boot mode uses the USB-Serial/JTAG sequence on Espressif native USB', async ({ page }) => {
+    await page.keyboard.press('c');
+    await expectOnScreen(page, 'hello from fake port');
+    await page.keyboard.press('Enter');
+    await page.keyboard.press('Control+a');
+    await page.keyboard.press('b');
+    await expectOnScreen(page, 'Boot mode sequence sent (USB-JTAG)');
+    // Idle, strap IO0 (DTR), then reset through (1,1) so the strap is latched, release.
+    expect(await page.evaluate(() => (window as any).__serialSignals)).toEqual([
+      '0,0',
+      '1,0',
+      '1,1',
+      '0,1',
+      '0,0',
+    ]);
   });
 
   test('help overlay opens and closes', async ({ page }) => {
@@ -145,14 +169,6 @@ test.describe('app', () => {
     await expectOnScreen(page, 'No device connected');
     await page.setViewportSize({ width: 400, height: 300 });
     await expectOnScreen(page, 'Terminal too small');
-  });
-
-  test('quit drops back to the fake shell and restarts on a key', async ({ page }) => {
-    await page.keyboard.press('q');
-    await expectOnScreen(page, '[esp-web-tool exited]');
-    await expectOnScreen(page, '$ esp-web-tool');
-    await page.keyboard.press('x');
-    await expectOnScreen(page, 'Parts · example');
   });
 
   test('M0 spike: demo flood keeps the UI responsive', async ({ page }) => {

@@ -1,6 +1,6 @@
 # ESP Web Tool — Specification
 
-Status: **Draft v0.2** (2026-10-17), M0 implemented — for iteration. Open questions are collected in §15.
+Status: **Draft v0.2** (2026-10-18), M0 implemented — for iteration. Open questions are collected in §15.
 
 ## 1. Summary
 
@@ -207,10 +207,9 @@ A browser tab is a hostile terminal. Chrome **does not let pages intercept** `Ct
 | `a` / `d` / `e` / `o` | Parts table: add file / delete row / edit offset / open folder (TUI file browser) |
 | `Enter` on the Monitor pane | Enter the monitor: **from here every key goes to the device** |
 | `Ctrl+]` | Leave the monitor (back to hotkeys) |
-| `Ctrl+A` then key | Monitor menu: `r` reset, `b` boot mode, `c` clear, `e` cycle line ending, `+`/`-` baud, `z` zoom, `Ctrl+A` send a literal `Ctrl+A`; later: `d` DTR, `s` RTS, `t` timestamps, `l` save log |
+| `Ctrl+A` then key | Monitor menu: `r` reset, `b` boot mode, `c` clear, `e` cycle line ending, `h` log-level colors, `+`/`-` baud, `z` zoom, `Ctrl+A` send a literal `Ctrl+A`; later: `d` DTR, `s` RTS, `t` timestamps, `l` save log |
 | `z` | Zoom / unzoom the focused pane |
 | `D` | Demo log stream: off → normal → flood (about 2 Mbaud); for trying the monitor without a device |
-| `q` | Quit to the fake shell; any key restarts |
 | `?` | Help overlay listing all keys |
 | `Esc` | Close dialog or overlay, cancel the current input |
 
@@ -219,7 +218,7 @@ Every action can also be done with the mouse: click to focus or select, the whee
 ### Visual style
 - Colors are **terminal palette entries** (16 ANSI + a few truecolor accents), defined as an xterm `ITheme`. The default dark theme is a low-saturation background with green/amber/cyan accents. A light theme follows `prefers-color-scheme`.
 - Progress bars use eighth-block characters (`▏▎▍▌▋▊▉█`) so they move smoothly; spinners use braille (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`).
-- Optional flourish: on load, print a fake shell line (`$ esp-web-tool`) and then switch to the alternate screen. When you quit (`q`), the screen drops back to that "shell" with a "press any key to restart" line.
+- No quit key and no fake shell: closing the tab is how you leave (dropped after M0 testing; it added nothing).
 
 ## 5. Flasher
 
@@ -361,11 +360,16 @@ So a generic "any public repo" flasher needs a proxy. For a firmware repo that c
 ## 8. Serial monitor
 
 - Device output is parsed by the pane's `@xterm/headless` instance (§3) and drawn inside the TUI, so ANSI colors, cursor moves and clears (ESP-IDF log colors, `menuconfig`-style output, REPLs) behave as they do in a real terminal.
+- **Log-level colors** (on by default, `Ctrl+A h` toggles): plain ESP-IDF lines starting `E (`, `W (` or `I (` are colored red, yellow or green, as `idf.py monitor` does. Firmware built without `CONFIG_LOG_COLORS` (the default in recent ESP-IDF) sends no escape codes of its own. Lines that already start with an escape code pass through untouched. The colorizer works on raw bytes before the terminal parser and holds at most a 3-byte line prefix, released after 30 ms if the device goes quiet (`src/monitor/log-color.ts`).
 - **Input modes**: *raw* (default; each keystroke is sent, which suits REPLs like MicroPython) or *line* (a local edit line, sent on Enter).
 - Line ending on send: `LF` / `CR` / `CRLF` / none.
 - Baud presets from 9600 to 2000000, plus a custom value. Changing the baud reopens the port.
 - Timestamps: an optional prefix per received line.
-- DTR/RTS toggles, **Reset** (EN pulse), **Boot** (enter the download mode sequence).
+- DTR/RTS toggles, **Reset** (EN pulse), **Boot** (enter the download mode sequence). The sequences follow esptool and depend on the port:
+  - USB-UART bridge (CP210x, CH340, FTDI…): the classic auto-reset circuit. `(DTR,RTS)` = `(0,1)` 100 ms → `(1,0)` 50 ms → `(0,0)`.
+  - Espressif USB-Serial/JTAG (`303a:1001`: C3, C5, C6, H2, P4, S3 native USB): strap first, then reset, passing through `(1,1)`. `(0,0)` → `(1,0)` → `(1,1)` → `(0,1)` 100 ms → `(0,0)`. The classic sequence does not latch download mode here. This is the likely reason boot mode failed on an ESP32-C5 in M0 testing; not yet confirmed on hardware.
+  - Each step sets both lines in one `setSignals()` call, so a USB adapter sees one control-line change per step.
+  - ESP32-S2/S3 USB-OTG CDC (TinyUSB) is not handled yet; it needs the manual BOOT+RESET path (§5).
 - Scrollback of 10k lines (configurable); scroll lock when the user scrolls up; clear.
 - **Save log**: download the whole session as `.log`, ANSI stripped or kept.
 - Decoding: UTF-8 with a streaming decoder (multi-byte sequences split across chunks are handled); invalid bytes show as `�`.
@@ -448,6 +452,11 @@ Settings (`localStorage`, best effort): theme, default bauds, auto-monitor, time
 - **Renderer choice**: software WebGL (SwiftShader/llvmpipe) was about 10× slower than xterm's DOM renderer, so WebGL is only enabled when `WEBGL_debug_renderer_info` reports a real GPU. `?renderer=dom|webgl` overrides this.
 - **Packaging**: `@xterm/headless@6.0.0` declares a `module` entry it does not ship, so Vite aliases it to `lib-headless/xterm-headless.mjs`. The bundle is about 655 kB (175 kB gzipped), mostly two copies of xterm.js core; worth revisiting (lazy-load the headless monitor terminal) if load time matters.
 - **TypeScript 6** is pinned because `typescript-eslint` does not support TS 7 yet.
+- **Laptop test (2026-10-18)**: the monitor works with a real ESP32-C5. Fixed after it:
+  - Boot mode did nothing. If the C5 was on its native USB port, the classic sequence was the wrong one. Added the USB-Serial/JTAG sequence (§8); needs a retest.
+  - Plain ESP-IDF logs showed uncolored. Added log-level colors (§8).
+  - A black strip appeared at the bottom on first load. xterm.css paints its viewport `#000`, and the pixels below the last whole row showed through. The viewport is now transparent, and the terminal refits when a web font finishes loading.
+  - Removed the quit key and the fake shell.
 
 ## 15. Open questions
 

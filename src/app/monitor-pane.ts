@@ -1,9 +1,12 @@
+import { LogColorizer } from '../monitor/log-color';
 import { TermPane } from '../monitor/term-pane';
 import type { KeyEvent } from '../tty/input';
 import type { Ctx } from '../tui/context';
 import type { Rect } from '../tui/screen';
 import { Attr } from '../tui/style';
 import type { Focusable } from '../tui/widgets';
+
+const RESET = new TextEncoder().encode('\x1b[0m');
 
 export const LINE_ENDINGS = [
   { label: 'LF', value: '\n' },
@@ -21,7 +24,12 @@ export class MonitorPane implements Focusable {
   eol = 0;
   /** True when there is something to show (an open port or the demo stream). */
   active = false;
+  /** Color plain ESP-IDF log lines by level (Ctrl+A h toggles). */
+  colorize = true;
   private hasOutput = false;
+  private colorizer = new LogColorizer();
+  private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  private encoder = new TextEncoder();
 
   get lineEnding(): (typeof LINE_ENDINGS)[number] {
     return LINE_ENDINGS[this.eol]!;
@@ -29,11 +37,33 @@ export class MonitorPane implements Focusable {
 
   write(data: string | Uint8Array, onParsed: () => void): void {
     this.hasOutput = true;
-    this.pane.write(data, onParsed);
+    if (!this.colorize) {
+      this.pane.write(data, onParsed);
+      return;
+    }
+    const bytes = typeof data === 'string' ? this.encoder.encode(data) : data;
+    this.pane.write(this.colorizer.push(bytes), onParsed);
+    if (this.flushTimer) clearTimeout(this.flushTimer);
+    this.flushTimer = null;
+    // A held line prefix (e.g. the echo of a typed "E") must not wait for the next byte.
+    if (this.colorizer.holding) {
+      this.flushTimer = setTimeout(() => {
+        this.flushTimer = null;
+        this.pane.write(this.colorizer.flush(), onParsed);
+      }, 30);
+    }
+  }
+
+  toggleColorize(): void {
+    // Flush a held prefix and end any color the colorizer started mid-line.
+    if (this.colorize) this.pane.write(Uint8Array.from([...this.colorizer.flush(), ...RESET]));
+    this.colorizer.reset();
+    this.colorize = !this.colorize;
   }
 
   clear(): void {
     this.pane.clear();
+    this.colorizer.reset();
     this.hasOutput = false;
   }
 

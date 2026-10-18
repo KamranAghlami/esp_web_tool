@@ -19,9 +19,8 @@ export const MIN_ROWS = 24;
 /** Below this width the panes are shown one at a time. */
 export const SPLIT_COLS = 120;
 
-const ENTER_APP = '\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b]0;ESP Web Tool\x07';
-const LEAVE_APP = '\x1b[?2004l\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[0m\x1b[?25h\x1b[?1049l';
-const PROMPT = '\x1b[32m$\x1b[0m esp-web-tool\r\n';
+/** Mouse tracking (button + drag, SGR encoding), bracketed paste, window title. */
+const ENTER_APP = '\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b]0;ESP Web Tool\x07';
 
 type Toast = { text: string; kind: 'info' | 'ok' | 'warn' | 'error'; until: number };
 type Overlay =
@@ -60,7 +59,6 @@ export class App {
   private overlay: Overlay | null = null;
   private toasts: Toast[] = [];
   private prefix = false;
-  private quit = false;
 
   private parser = new InputParser();
   private renderer = new Renderer();
@@ -101,8 +99,7 @@ export class App {
   }
 
   start(): void {
-    this.quit = false;
-    this.tty.write(PROMPT + ENTER_APP);
+    this.tty.write(ENTER_APP);
     this.renderer.invalidate();
     this.invalidate();
   }
@@ -113,7 +110,7 @@ export class App {
   }
 
   invalidate = (): void => {
-    if (this.frameQueued || this.quit) return;
+    if (this.frameQueued) return;
     this.frameQueued = true;
     this.schedule(() => {
       this.frameQueued = false;
@@ -133,10 +130,6 @@ export class App {
   // Input
 
   private onData(data: string): void {
-    if (this.quit) {
-      this.start();
-      return;
-    }
     for (const e of this.parser.feed(data)) this.dispatch(e);
     this.invalidate();
   }
@@ -209,9 +202,6 @@ export class App {
       case '?':
         this.overlay = { kind: 'help', scroll: 0 };
         return true;
-      case 'q':
-        this.exit();
-        return true;
       case 'enter':
         if (this.pane === 'monitor') {
           this.enterLive();
@@ -270,14 +260,25 @@ export class App {
         this.send('\x01');
         break;
       case 'r':
-        if (open) void ports.reset().then(() => this.toast('Reset (EN pulsed via RTS)', 'ok'));
+        if (open) void ports.reset().then(() => this.toast('Reset sent', 'ok'));
         break;
       case 'b':
         if (open)
-          void ports.enterBootloader().then(() => this.toast('Boot mode sequence sent', 'ok'));
+          void ports
+            .enterBootloader()
+            .then(() =>
+              this.toast(
+                `Boot mode sequence sent (${ports.usbJtag ? 'USB-JTAG' : 'DTR/RTS'})`,
+                'ok',
+              ),
+            );
         break;
       case 'c':
         this.monitor.clear();
+        break;
+      case 'h':
+        this.monitor.toggleColorize();
+        this.toast(`Log level colors: ${this.monitor.colorize ? 'on' : 'off'}`, 'info');
         break;
       case 'e':
         this.monitor.eol = (this.monitor.eol + 1) % LINE_ENDINGS.length;
@@ -304,7 +305,7 @@ export class App {
         break;
       default:
         this.toast(
-          '^A menu: r reset · b boot · c clear · e line ending · +/- baud · z zoom',
+          '^A menu: r reset · b boot · c clear · e line end · h colors · +/- baud · z zoom',
           'info',
         );
     }
@@ -465,13 +466,6 @@ export class App {
         : 'Demo stream on. D again for flood',
       'info',
     );
-  }
-
-  private exit(): void {
-    void this.ports.close();
-    this.setDemo('off');
-    this.quit = true;
-    this.tty.write(LEAVE_APP + '\x1b[2m[esp-web-tool exited] press any key to restart\x1b[0m\r\n');
   }
 
   private onPortState(s: PortState, detail?: string): void {
@@ -659,6 +653,7 @@ export class App {
         { key: 'b', label: 'Boot' },
         { key: 'c', label: 'Clear' },
         { key: 'e', label: 'Line end' },
+        { key: 'h', label: 'Colors' },
         { key: '+/-', label: 'Baud' },
         { key: 'z', label: 'Zoom' },
         { key: '^A', label: 'Send ^A' },
@@ -688,7 +683,6 @@ export class App {
         action: () => this.setDemo(this.demo === 'off' ? 'normal' : 'off'),
       },
       { key: '?', label: 'Help', action: () => (this.overlay = { kind: 'help', scroll: 0 }) },
-      { key: 'q', label: 'Quit', action: () => this.exit() },
     ];
   }
 

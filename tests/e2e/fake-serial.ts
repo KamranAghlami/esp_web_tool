@@ -1,7 +1,8 @@
 /**
  * Injected before the app loads: replaces navigator.serial with a fake device that behaves
  * like Chrome's gate: requestPort() rejects unless the page has transient user activation.
- * Everything written to the port is recorded in window.__serialWritten and echoed back.
+ * Everything written to the port is recorded in window.__serialWritten and echoed back, and
+ * control-line changes in window.__serialSignals as "DTR,RTS" pairs of 0/1.
  */
 export function installFakeSerial(): void {
   const enc = new TextEncoder();
@@ -10,8 +11,10 @@ export function installFakeSerial(): void {
     __serialWritten: string;
     __serialRequests: { activation: boolean }[];
     __serialEmit: (s: string) => void;
+    __serialSignals: string[];
   };
   w.__serialWritten = '';
+  w.__serialSignals = [];
   w.__serialRequests = [];
 
   class FakePort extends EventTarget {
@@ -40,7 +43,14 @@ export function installFakeSerial(): void {
       w.__serialEmit = (s) => this.ctrl?.enqueue(enc.encode(s));
     }
 
-    async setSignals() {}
+    private dtr = true;
+    private rts = true;
+
+    async setSignals(s: { dataTerminalReady?: boolean; requestToSend?: boolean }) {
+      this.dtr = s.dataTerminalReady ?? this.dtr;
+      this.rts = s.requestToSend ?? this.rts;
+      w.__serialSignals.push(`${+this.dtr},${+this.rts}`);
+    }
 
     async close() {
       this.readable = null;

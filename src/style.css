@@ -16,3 +16,9 @@ body {
 #terminal .xterm {
   height: 100%;
 }
+
+/* xterm.css paints its viewport black; the pixels left below the last whole row and right of
+   the last column would show as a black strip. */
+#terminal .xterm .xterm-viewport {
+  background-color: transparent;
+}

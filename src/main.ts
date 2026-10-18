@@ -88,6 +88,8 @@ async function main(): Promise<void> {
 
   const refit = () => fit.fit();
   new ResizeObserver(refit).observe(host);
+  // A face that finishes loading later (first visit, empty cache) can change the cell size.
+  document.fonts.addEventListener('loadingdone', refit);
   refit();
 
   const app = new App({ tty: new XtermTty(term) });

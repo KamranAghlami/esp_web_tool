@@ -23,6 +23,9 @@ export function describePort(port: SerialPort): string {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+const ESPRESSIF_VID = 0x303a;
+const USB_JTAG_PID = 0x1001;
+
 export class PortManager {
   port: SerialPort | null = null;
   baudRate = 115200;
@@ -128,24 +131,51 @@ export class PortManager {
     }
   }
 
-  /** Pulse EN via RTS (classic auto-reset circuit), leaving the chip running its app. */
-  async reset(): Promise<void> {
-    const p = this.port;
-    if (!p) return;
-    await p.setSignals({ dataTerminalReady: false, requestToSend: true });
-    await sleep(100);
-    await p.setSignals({ dataTerminalReady: false, requestToSend: false });
+  /**
+   * Espressif's built-in USB-Serial/JTAG controller (C3, C5, C6, H2, P4, S3 native USB). It
+   * maps DTR/RTS onto reset and boot strapping itself, and needs its own sequences.
+   */
+  get usbJtag(): boolean {
+    const info = this.port?.getInfo();
+    return info?.usbVendorId === ESPRESSIF_VID && info.usbProductId === USB_JTAG_PID;
   }
 
-  /** Classic DTR/RTS sequence that leaves the chip in the ROM download mode. */
+  /** Pulse EN via RTS, leaving the chip running its app. */
+  async reset(): Promise<void> {
+    if (!this.port) return;
+    await this.signals(false, false);
+    await this.signals(false, true);
+    await sleep(this.usbJtag ? 200 : 100);
+    await this.signals(false, false);
+  }
+
+  /** Reset into the ROM download mode (the sequences esptool uses). */
   async enterBootloader(): Promise<void> {
-    const p = this.port;
-    if (!p) return;
-    await p.setSignals({ dataTerminalReady: false, requestToSend: true });
+    if (!this.port) return;
+    if (this.usbJtag) {
+      // Strap first, then reset. Go through (1,1) rather than (0,0) so reset is never
+      // released with the strap dropped.
+      await this.signals(false, false);
+      await sleep(100);
+      await this.signals(true, false);
+      await sleep(100);
+      await this.signals(true, true);
+      await this.signals(false, true);
+      await sleep(100);
+      await this.signals(false, false);
+      return;
+    }
+    // Classic two-transistor auto-reset circuit: EN low, then IO0 low as EN is released.
+    await this.signals(false, true);
     await sleep(100);
-    await p.setSignals({ dataTerminalReady: true, requestToSend: false });
+    await this.signals(true, false);
     await sleep(50);
-    await p.setSignals({ dataTerminalReady: false, requestToSend: false });
+    await this.signals(false, false);
+  }
+
+  /** Set both lines in one request, so USB adapters see a single control-line change. */
+  private signals(dtr: boolean, rts: boolean): Promise<void> {
+    return this.port!.setSignals({ dataTerminalReady: dtr, requestToSend: rts });
   }
 }
 
