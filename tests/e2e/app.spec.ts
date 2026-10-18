@@ -436,7 +436,8 @@ test.describe('app', () => {
     await page.setViewportSize({ width: 760, height: 430 });
     await page.setViewportSize({ width: 1600, height: 900 });
     await expect.poll(state).toEqual({ type: 'alternate', viewportY: 0, baseY: 0 });
-    expect((await screenText(page))[0]).toContain('ESP Web Tool');
+    // The redraw lands a frame after the resize.
+    await expect.poll(async () => (await screenText(page))[0]).toContain('ESP Web Tool');
   });
 
   test('help overlay opens and closes', async ({ page }) => {
