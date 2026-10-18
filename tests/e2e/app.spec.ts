@@ -237,6 +237,33 @@ test.describe('app', () => {
     await expectOnScreen(page, 'Copied');
   });
 
+  test('double click selects a word, triple click a line, never the pane border', async ({
+    page,
+  }) => {
+    await page.evaluate(() => {
+      (window as any).__copied = [];
+      navigator.clipboard.writeText = async (t: string) => void (window as any).__copied.push(t);
+    });
+    await page.keyboard.press('c');
+    await expectOnScreen(page, 'hello from fake port');
+    await page.evaluate(() => (window as any).__serialEmit('W (5) sensor: retrying in 500 ms\r\n'));
+    await expectOnScreen(page, 'retrying in 500 ms');
+    const at = await find(page, 'W (5) sensor');
+    const copied = () => page.evaluate(() => (window as any).__copied.at(-1));
+
+    const word = cellCenter(info, at.col + 'W (5) '.length + 2, at.row);
+    await page.mouse.dblclick(word.x, word.y);
+    await expect.poll(copied).toBe('sensor:');
+
+    // "W" is the first cell of the pane, right after the border: the border stays out.
+    const first = cellCenter(info, at.col, at.row);
+    await page.mouse.dblclick(first.x, first.y);
+    await expect.poll(copied).toBe('W');
+
+    await page.mouse.click(word.x, word.y, { clickCount: 3 });
+    await expect.poll(copied).toBe('W (5) sensor: retrying in 500 ms');
+  });
+
   test('status line shows rx and tx rates while connected', async ({ page }) => {
     await page.keyboard.press('c');
     await expectOnScreen(page, 'hello from fake port');

@@ -8,6 +8,8 @@ import { Attr } from '../tui/style';
 import type { Focusable } from '../tui/widgets';
 
 const RESET = new TextEncoder().encode('\x1b[0m');
+/** Presses closer together than this (on the same cell) count as a double or triple click. */
+const MULTI_CLICK_MS = 400;
 
 export const LINE_ENDINGS = [
   { label: 'LF', value: '\n' },
@@ -50,6 +52,9 @@ export class MonitorPane implements Focusable {
   /** Called with the selected text when a drag selection ends. */
   onCopy?: (text: string) => void;
   private sel: Selection | null = null;
+  private lastDown = { t: -Infinity, x: -1, y: -1, count: 0 };
+  /** Clock for multi-click detection (injectable for tests). */
+  now: () => number = () => performance.now();
   private hasOutput = false;
   private colorizer = new LogColorizer();
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -134,10 +139,18 @@ export class MonitorPane implements Focusable {
       case 'wheeldown':
         this.pane.scroll(3);
         break;
-      case 'down':
+      case 'down': {
         this.clearSelection();
-        if (e.button === 0 && this.hasOutput) this.startSelection(e, r);
+        if (e.button !== 0 || !this.hasOutput) break;
+        const t = this.now();
+        const last = this.lastDown;
+        const repeat = t - last.t < MULTI_CLICK_MS && e.x === last.x && e.y === last.y;
+        const count = repeat ? (last.count % 3) + 1 : 1;
+        this.lastDown = { t, x: e.x, y: e.y, count };
+        if (count === 1) this.startSelection(e, r);
+        else this.selectUnit(e, r, count === 2 ? 'word' : 'line');
         break;
+      }
       case 'drag':
         this.extendSelection(e, r);
         break;
@@ -170,6 +183,47 @@ export class MonitorPane implements Focusable {
     const { abs, col } = this.cellAt(e, r);
     const pos = { line: abs - ref.line, col };
     this.sel = { ref, a: pos, b: { ...pos }, dragging: true, moved: false };
+  }
+
+  /**
+   * Double click: the run of non-blank cells under the pointer. Triple click: the whole line.
+   * Only buffer cells count, so pane borders and other UI never join a word. Copied at once.
+   */
+  private selectUnit(e: MouseEvent, r: Rect, unit: 'word' | 'line'): void {
+    const term = this.pane.term;
+    const ref = term.registerMarker(0);
+    if (!ref) return;
+    const { abs, col } = this.cellAt(e, r);
+    const line = term.buffer.active.getLine(abs);
+    if (!line) return ref.dispose();
+    let start = 0;
+    let end = term.cols - 1;
+    if (unit === 'word') {
+      const cell = term.buffer.active.getNullCell();
+      const isWord = (x: number) => {
+        const c = line.getCell(x, cell);
+        if (!c) return false;
+        if (c.getWidth() === 0) return true; // right half of a wide character
+        const ch = c.getChars();
+        return ch !== '' && !/\s/.test(ch);
+      };
+      if (!isWord(col)) return ref.dispose();
+      start = col;
+      end = col;
+      while (start > 0 && isWord(start - 1)) start--;
+      while (end < term.cols - 1 && isWord(end + 1)) end++;
+    }
+    const at = abs - ref.line;
+    this.sel = {
+      ref,
+      a: { line: at, col: start },
+      b: { line: at, col: end },
+      dragging: false,
+      moved: true,
+    };
+    const text = this.selectedText();
+    if (text) this.onCopy?.(text);
+    else this.clearSelection();
   }
 
   private extendSelection(e: MouseEvent, r: Rect): void {

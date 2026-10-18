@@ -83,6 +83,9 @@ async function main(): Promise<void> {
     customGlyphs: true,
     macOptionIsMeta: true,
     macOptionClickForcesSelection: true,
+    // xterm's right-click word selection (on by default on macOS) sees the screen as one text,
+    // so pane borders join words. The monitor has its own double-click selection instead.
+    rightClickSelectsWord: false,
   });
 
   const fit = new FitAddon();

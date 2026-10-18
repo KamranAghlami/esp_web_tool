@@ -218,7 +218,7 @@ Every action can also be done with the mouse:
 - Key-bar entries are clickable.
 - A `value ▾` picker (the flash baud) opens its full list on click, Enter or Space, and a click also focuses it.
 - The title links to the repository and the version to its release page (`releases/tag/v<version>`). Both open with `window.open` from the click and are not underlined, to keep the frame clean.
-- **Selection**: dragging in the monitor selects text tmux-style. The selection is anchored to the buffer (an xterm marker), so it stays on the same text while output streams in. Dragging past the edge scrolls. It is copied to the clipboard on release, through the Clipboard API with an `execCommand('copy')` fallback. Shift-drag (Option-drag on macOS) is xterm's own screen selection, for anything else on screen.
+- **Selection**: dragging in the monitor selects text tmux-style. The selection is anchored to the buffer (an xterm marker), so it stays on the same text while output streams in. Dragging past the edge scrolls. It is copied to the clipboard on release, through the Clipboard API with an `execCommand('copy')` fallback. Double click selects a word (a run of non-blank buffer cells) and triple click the line; both copy at once. They work on the monitor's own buffer, so pane borders never join a word. xterm's right-click word selection (on by default on macOS) is turned off for that reason. Shift-drag (Option-drag on macOS) is xterm's own screen selection, for anything else on screen.
 
 ### Visual style
 - Colors are **terminal palette entries** (16 ANSI + a few truecolor accents), defined as an xterm `ITheme`. The default dark theme is a low-saturation background with green/amber/cyan accents. A light theme follows `prefers-color-scheme`.
@@ -484,6 +484,7 @@ Settings live in `localStorage`, so every browser (each computer or phone) keeps
   - Settings are remembered per browser and per USB device.
   - Baud, format and line ending moved under Ctrl+A `s` Settings, and `f` is Fullscreen in that menu.
   - `D` is reserved for dumping flash; the demo stream is now URL-only.
+  - Double/triple click selects a word/line in the monitor. xterm's right-click word selection (macOS default) treated borders as part of words and is now off.
 
 ## 15. Open questions
 
