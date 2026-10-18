@@ -31,7 +31,7 @@ export const HELP: [string, string?][] = [
   [''],
   ['Mouse'],
   ['drag in Monitor', 'select text; copied on release'],
-  ['click ‹ value ›', 'arrows step, the value opens a list'],
+  ['click value ▾', 'pick from the list (or Enter / Space)'],
   ['Shift-drag', 'select anything (Option-drag on macOS)'],
   ['Ctrl-Shift-C / V', 'copy that selection / paste'],
 ];

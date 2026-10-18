@@ -108,11 +108,11 @@ describe('Menu', () => {
         { key: '^A', label: 'Ctrl thing', checked: true, action: () => log.push('ctrl') },
       ],
       () => log.push('close'),
-      { anchor: { x: 30, y: 0 } },
+      { within: { x: 20, y: 0, w: 20, h: 10 } },
     );
     const c = ctx();
     menu.render(c);
-    const rows = Array.from({ length: 5 }, (_, y) => c.screen.rowText(y));
+    const rows = Array.from({ length: 10 }, (_, y) => c.screen.rowText(y));
     expect(rows.join('\n')).toContain('a   Alpha');
     expect(rows.join('\n')).toContain('✓ ^A  Ctrl thing');
     expect(menu.selected).toBe(1); // starts on the checked item

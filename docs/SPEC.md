@@ -207,7 +207,7 @@ A browser tab is a hostile terminal. Chrome **does not let pages intercept** `Ct
 | `a` / `d` / `e` / `o` | Parts table: add file / delete row / edit offset / open folder (TUI file browser) |
 | `Enter` on the Monitor pane | Enter the monitor: **from here every key goes to the device** |
 | `Ctrl+]` | Leave the monitor (back to hotkeys) |
-| `Ctrl+A` | Monitor menu: a centered pop-up that lists its keys and is clickable (live, or with the Monitor pane focused). `r` reset, `b` boot mode, `c` clear, `s` baud ▸, `f` format (8N1, 8E1, 7E1…) ▸, `e` line ending ▸, `h` log-level colors, `z` fullscreen, `Ctrl+A` send a literal `Ctrl+A`, `?` help; later: `d` DTR, `t` timestamps, `l` save log. Submenus have a `‹ Back` row; Esc, ← and Backspace go back. Current values show in the menu labels and the status line (`303a:1001 @ 115200 8N1`), not in the pane header. |
+| `Ctrl+A` | Monitor menu: a centered pop-up that lists its keys and is clickable (live, or with the Monitor pane focused). `r` reset, `b` boot mode, `c` clear, `s` baud ▸, `f` format (8N1, 8E1, 7E1…) ▸, `e` line ending ▸, `h` log-level colors, `z` fullscreen, `Ctrl+A` send a literal `Ctrl+A`, `?` help; later: `d` DTR, `t` timestamps, `l` save log. Menus open centered on the pane they belong to. Submenus have a `‹ Back` row; Esc and Backspace go back. Current values show in the menu labels and the status line (`303a:1001 @ 115200 8N1`), not in the pane header. |
 | `z` | Fullscreen the focused pane; again to restore |
 | `D` | Demo log stream: off → normal → flood (about 2 Mbaud); for trying the monitor without a device |
 | `?` | Help overlay listing all keys |
@@ -216,8 +216,8 @@ A browser tab is a hostile terminal. Chrome **does not let pages intercept** `Ct
 Every action can also be done with the mouse:
 - Click to focus or select. The wheel scrolls lists, the monitor and the help.
 - Key-bar entries are clickable.
-- A `‹ value ›` picker steps with its arrows and opens the full list as a dropdown when you click the value.
-- The title links to the repository and the version to its releases (opened with `window.open` from the click; not underlined, to keep the frame clean).
+- A `value ▾` picker (the flash baud) opens its full list on click, Enter or Space, and a click also focuses it.
+- The title links to the repository and the version to its release page (`releases/tag/v<version>`). Both open with `window.open` from the click and are not underlined, to keep the frame clean.
 - **Selection**: dragging in the monitor selects text tmux-style. The selection is anchored to the buffer (an xterm marker), so it stays on the same text while output streams in. Dragging past the edge scrolls. It is copied to the clipboard on release, through the Clipboard API with an `execCommand('copy')` fallback. Shift-drag (Option-drag on macOS) is xterm's own screen selection, for anything else on screen.
 
 ### Visual style
@@ -469,6 +469,12 @@ Settings (`localStorage`, best effort): theme, default bauds, auto-monitor, time
   - Shift-drag selection did not do what was wanted. xterm's selection is screen-fixed, so it spans both panes and stays put while the log scrolls; on macOS it needs Option. Added buffer-anchored drag selection in the monitor.
   - Added: mouse wheel in the help, the title and version as links, a tx rate next to rx, and clickable dropdowns for baud and line ending.
 - **Third pass (2026-10-18)**: the frame format is configurable (was fixed 8N1). The pane header lost "● LIVE" (the key bar says it) and the baud/line-ending dropdowns (they are in the menu). Baud +/- removed. Zoom renamed Fullscreen. Menus are centered and submenus have Back. Links are no longer underlined.
+- **Fourth pass (2026-10-18)**:
+  - ← no longer goes back in menus.
+  - Menus center on their pane.
+  - The version links to its own release.
+  - The text cursor is hidden while an overlay is open.
+  - The flash baud is a `value ▾` picker instead of a `‹ value ›` stepper, and clicking it focuses it.
 
 ## 15. Open questions
 

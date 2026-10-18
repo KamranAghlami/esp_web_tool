@@ -375,10 +375,9 @@ export class RadioGroup<T extends string> implements Focusable {
   }
 }
 
-/** `‹ 921600 ›` value picker; left/right cycle through `values`, a click on the value picks. */
-export class Cycler<T> implements Focusable {
-  /** Called when the value itself is clicked, with the cell below it (to anchor a menu). */
-  onPick?: (anchor: Anchor) => void;
+/** ` 921600 ▾ ` value picker: Enter, Space or a click opens the full list (`onOpen`). */
+export class Select<T> implements Focusable {
+  onOpen?: () => void;
 
   constructor(
     public values: readonly T[],
@@ -390,47 +389,35 @@ export class Cycler<T> implements Focusable {
     return this.values[this.index]!;
   }
 
+  private get label(): string {
+    return ` ${this.format(this.value)} ▾ `;
+  }
+
+  get width(): number {
+    return stringWidth(this.label);
+  }
+
   render(ctx: Ctx, r: Rect, focused: boolean): void {
     const { screen, theme } = ctx;
     const style = focused
       ? { fg: theme.selFg, bg: theme.selBg }
       : { fg: theme.fg, bg: theme.inputBg };
-    const label = `‹ ${this.format(this.value)} ›`;
-    screen.text(r.x, r.y, label, style, r.w);
-    const w = stringWidth(label);
+    screen.text(r.x, r.y, this.label, style, r.w);
     ctx.hits.add(
-      { x: r.x, y: r.y, w, h: 1 },
-      (e) => e.action === 'down' && this.onPick?.({ x: r.x, y: r.y }),
+      { x: r.x, y: r.y, w: Math.min(r.w, this.width), h: 1 },
+      (e) => e.action === 'down' && this.onOpen?.(),
       this,
     );
-    ctx.hits.add({ x: r.x, y: r.y, w: 2, h: 1 }, (e) => e.action === 'down' && this.step(-1), this);
-    ctx.hits.add(
-      { x: r.x + w - 2, y: r.y, w: 2, h: 1 },
-      (e) => e.action === 'down' && this.step(1),
-      this,
-    );
-  }
-
-  step(d: number): void {
-    const n = this.values.length;
-    this.index = (((this.index + d) % n) + n) % n;
   }
 
   handleKey(e: KeyEvent): boolean {
-    if (e.name === 'left' || e.name === 'h') this.step(-1);
-    else if (e.name === 'right' || e.name === 'l' || e.name === ' ') this.step(1);
-    else return false;
+    if (e.name !== 'enter' && e.name !== ' ') return false;
+    this.onOpen?.();
     return true;
   }
 }
 
 // ---------------------------------------------------------------------------
-
-/** A cell to open a pop-up from: it opens below the cell, or above if there is no room. */
-export interface Anchor {
-  x: number;
-  y: number;
-}
 
 export interface MenuItem {
   /** Shortcut, e.g. 'r' or '^A' (Ctrl+A). */
@@ -441,9 +428,9 @@ export interface MenuItem {
 }
 
 export interface MenuOptions {
-  /** Open below (or above) this cell, like a dropdown; centered on screen without one. */
-  anchor?: Anchor;
-  /** Makes this a submenu: adds a `‹ Back` row, and Esc, ← and Backspace go back. */
+  /** Center on this area (the pane the menu belongs to); the whole screen without one. */
+  within?: Rect;
+  /** Makes this a submenu: adds a `‹ Back` row, and Esc and Backspace go back. */
   onBack?: () => void;
 }
 
@@ -478,18 +465,14 @@ export class Menu {
       Math.max(stringWidth(this.title) + 6, 4 + 2 + (keyW ? keyW + 2 : 0) + labelW),
     );
     const h = Math.min(this.items.length + 2, screen.rows);
-    const full = { x: 0, y: 0, w: screen.cols, h: screen.rows };
-    let r = centered(full, w, h);
-    const a = this.opts.anchor;
-    if (a) {
-      const below = a.y + 1;
-      r = {
-        x: Math.max(0, Math.min(a.x, screen.cols - w)),
-        y: below + h <= screen.rows ? below : Math.max(0, a.y - h),
-        w,
-        h,
-      };
-    }
+    const c = centered(this.opts.within ?? { x: 0, y: 0, w: screen.cols, h: screen.rows }, w, h);
+    // Keep it on screen when it is bigger than the pane.
+    const r = {
+      x: Math.max(0, Math.min(c.x, screen.cols - w)),
+      y: Math.max(0, Math.min(c.y, screen.rows - h)),
+      w,
+      h,
+    };
 
     ctx.hits.add({ x: 0, y: 0, w: screen.cols, h: screen.rows }, (e) => {
       if (e.action === 'down') this.onClose();
@@ -583,7 +566,6 @@ export class Menu {
         return true;
       case 'escape':
       case 'q':
-      case 'left':
       case 'backspace':
         if (this.isSubmenu || name === 'escape' || name === 'q') this.back();
         return true;

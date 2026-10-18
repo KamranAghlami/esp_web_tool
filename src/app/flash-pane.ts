@@ -2,15 +2,15 @@ import type { Ctx } from '../tui/context';
 import { rows } from '../tui/layout';
 import type { Rect } from '../tui/screen';
 import { Attr } from '../tui/style';
-import { padEnd, stringWidth } from '../tui/width';
+import { padEnd } from '../tui/width';
 import {
   Checkbox,
-  Cycler,
   type Focusable,
   ListView,
   panel,
   progressBar,
   RadioGroup,
+  Select,
   TextInput,
 } from '../tui/widgets';
 
@@ -68,7 +68,7 @@ export class FlashPane {
       return `${box} ${hex6(p.offset)}  ${padEnd(p.name, nameW)}${size}`;
     },
   );
-  readonly baud = new Cycler(BAUD_RATES, BAUD_RATES.indexOf(921600));
+  readonly baud = new Select(BAUD_RATES, BAUD_RATES.indexOf(921600));
   readonly eraseAll = new Checkbox('Erase all');
   readonly verify = new Checkbox('Verify', true);
   readonly resetAfter = new Checkbox('Reset after', true);
@@ -144,8 +144,8 @@ export class FlashPane {
     let x = optsRow!.x + 1;
     screen.text(x, optsRow!.y, 'Baud', { fg: theme.dim });
     x += 5;
-    this.baud.render(ctx, { x, y: optsRow!.y, w: 13, h: 1 }, f(this.baud));
-    x += stringWidth(`‹ ${this.baud.value} ›`) + 2;
+    this.baud.render(ctx, { x, y: optsRow!.y, w: this.baud.width, h: 1 }, f(this.baud));
+    x += this.baud.width + 2;
     for (const cb of [this.eraseAll, this.verify, this.resetAfter]) {
       if (x + cb.width > optsRow!.x + optsRow!.w) break;
       cb.render(ctx, { x, y: optsRow!.y, w: cb.width, h: 1 }, f(cb));

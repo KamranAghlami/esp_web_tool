@@ -189,8 +189,12 @@ test.describe('app', () => {
       parity: 'even',
       stopBits: 1,
     });
-    // The flash pane's ‹ value › opens a list too.
-    await clickText(page, info, '921600');
+    // The flash pane's baud opens its list straight away, and takes focus.
+    await clickText(page, info, '921600 ▾');
+    await expectOnScreen(page, 'Flash baud');
+    await clickText(page, info, '1500000');
+    await expectOnScreen(page, '1500000 ▾');
+    await page.keyboard.press('Enter'); // focused, so Enter reopens the list
     await expectOnScreen(page, 'Flash baud');
   });
 
@@ -203,7 +207,7 @@ test.describe('app', () => {
     await clickText(page, info, 'v0.1.0');
     expect(await page.evaluate(() => (window as any).__opened)).toEqual([
       'https://github.com/KamranAghlami/esp_web_tool',
-      'https://github.com/KamranAghlami/esp_web_tool/releases',
+      'https://github.com/KamranAghlami/esp_web_tool/releases/tag/v0.1.0',
     ]);
   });
 

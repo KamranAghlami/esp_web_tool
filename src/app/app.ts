@@ -81,6 +81,12 @@ export class App {
   pane: 'flash' | 'monitor' = 'flash';
   private flashFocus = 0;
   private zoomed = false;
+  /** Where the panes were last drawn, to center their menus on them. */
+  private rects: { main: Rect | null; flash: Rect | null; monitor: Rect | null } = {
+    main: null,
+    flash: null,
+    monitor: null,
+  };
   private overlay: Overlay | null = null;
   private toasts: Toast[] = [];
 
@@ -119,7 +125,7 @@ export class App {
         (err: unknown) => this.toast(`Copy failed: ${errorText(err)}`, 'error'),
       );
     };
-    this.flash.baud.onPick = (anchor) =>
+    this.flash.baud.onOpen = () =>
       this.openMenu(
         'Flash baud',
         BAUD_RATES.map((b, i) => ({
@@ -127,7 +133,7 @@ export class App {
           checked: i === this.flash.baud.index,
           action: () => (this.flash.baud.index = i),
         })),
-        { anchor },
+        { within: this.rects.flash ?? undefined },
       );
     this.ports = new PortManager({
       onData: (bytes) => this.monitor.write(bytes, () => this.invalidate()),
@@ -185,8 +191,10 @@ export class App {
   private dispatch(e: InputEvent): void {
     if (e.type === 'mouse') {
       this.lastTrigger = 'mouse';
+      // A click on a widget focuses it, even if the click also opened an overlay (a menu).
+      const covered = this.overlay !== null;
       const { owner } = this.hits.dispatch(e);
-      if (e.action === 'down' && owner && !this.overlay) this.focusWidget(owner);
+      if (e.action === 'down' && owner && !covered) this.focusWidget(owner);
       return;
     }
     this.lastTrigger = 'key';
@@ -321,28 +329,36 @@ export class App {
     const open = this.ports.state === 'open';
     const m = this.monitor;
     const p = this.ports;
-    const menu = this.openMenu('Monitor · Ctrl-A', [
-      { key: 'r', label: 'Reset chip', action: () => this.resetChip() },
-      { key: 'b', label: 'Boot (download) mode', action: () => this.bootMode() },
-      { key: 'c', label: 'Clear', action: () => m.clear() },
-      { key: 's', label: `Baud: ${p.baudRate} ▸`, action: () => this.openBaudMenu() },
-      { key: 'f', label: `Format: ${p.format} ▸`, action: () => this.openFormatMenu() },
-      { key: 'e', label: `Line ending: ${m.lineEnding.label} ▸`, action: () => this.openEolMenu() },
-      {
-        key: 'h',
-        label: 'Log level colors',
-        checked: m.colorize,
-        action: () => this.toggleColors(),
-      },
-      {
-        key: 'z',
-        label: 'Fullscreen pane',
-        checked: this.zoomed,
-        action: () => this.toggleFullscreen(),
-      },
-      { key: '^A', label: 'Send Ctrl-A', action: () => open && this.send('\x01') },
-      { key: '?', label: 'Help', action: () => (this.overlay = { kind: 'help', scroll: 0 }) },
-    ]);
+    const menu = this.openMenu(
+      'Monitor · Ctrl-A',
+      [
+        { key: 'r', label: 'Reset chip', action: () => this.resetChip() },
+        { key: 'b', label: 'Boot (download) mode', action: () => this.bootMode() },
+        { key: 'c', label: 'Clear', action: () => m.clear() },
+        { key: 's', label: `Baud: ${p.baudRate} ▸`, action: () => this.openBaudMenu() },
+        { key: 'f', label: `Format: ${p.format} ▸`, action: () => this.openFormatMenu() },
+        {
+          key: 'e',
+          label: `Line ending: ${m.lineEnding.label} ▸`,
+          action: () => this.openEolMenu(),
+        },
+        {
+          key: 'h',
+          label: 'Log level colors',
+          checked: m.colorize,
+          action: () => this.toggleColors(),
+        },
+        {
+          key: 'z',
+          label: 'Fullscreen pane',
+          checked: this.zoomed,
+          action: () => this.toggleFullscreen(),
+        },
+        { key: '^A', label: 'Send Ctrl-A', action: () => open && this.send('\x01') },
+        { key: '?', label: 'Help', action: () => (this.overlay = { kind: 'help', scroll: 0 }) },
+      ],
+      { within: this.monitorArea() },
+    );
     // An action menu, not a choice: start at the top (or where the submenu came from).
     menu.selected = Math.max(
       0,
@@ -352,7 +368,15 @@ export class App {
 
   /** A submenu of the Ctrl+A menu: Back (or Esc) returns to it. */
   private openSubmenu(title: string, from: string, items: MenuItem[]): void {
-    this.openMenu(title, items, { onBack: () => this.openMonitorMenu(from) });
+    this.openMenu(title, items, {
+      within: this.monitorArea(),
+      onBack: () => this.openMonitorMenu(from),
+    });
+  }
+
+  /** Monitor menus center on the monitor pane, or the main area while it is hidden. */
+  private monitorArea(): Rect | undefined {
+    return this.rects.monitor ?? this.rects.main ?? undefined;
   }
 
   private openBaudMenu(): void {
@@ -646,7 +670,8 @@ export class App {
     screen.box({ x: 0, y: 0, w: W, h: H }, border);
     this.link(ctx, 2, 0, 'ESP Web Tool', REPO_URL, { fg: theme.title, attrs: Attr.Bold });
     const ver = `v${__APP_VERSION__} · ${__GIT_SHA__}`;
-    this.link(ctx, W - 3 - stringWidth(ver), 0, ver, `${REPO_URL}/releases`, { fg: theme.dim });
+    const release = `${REPO_URL}/releases/tag/v${__APP_VERSION__}`;
+    this.link(ctx, W - 3 - stringWidth(ver), 0, ver, release, { fg: theme.dim });
     this.drawStatus(ctx, { x: 2, y: 1, w: W - 4, h: 1 });
 
     const main: Rect = { x: 1, y: 3, w: W - 2, h: H - 6 };
@@ -675,6 +700,7 @@ export class App {
       monRect = main;
     }
 
+    this.rects = { main, flash: flashRect, monitor: monRect };
     const focus = this.focused();
     if (flashRect) {
       this.paneTitle(ctx, flashRect.x, 'Flash', this.pane === 'flash', '1');
@@ -700,7 +726,10 @@ export class App {
 
     keyBar(ctx, { x: 2, y: H - 2, w: W - 4, h: 1 }, this.hints());
     this.drawToasts(ctx, main);
-    if (this.overlay) this.drawOverlay(ctx);
+    if (this.overlay) {
+      ctx.cursor.visible = false; // no text cursor blinking through a dialog
+      this.drawOverlay(ctx);
+    }
   }
 
   /** Text that opens `url` when clicked, set into a border with a space each side. */
