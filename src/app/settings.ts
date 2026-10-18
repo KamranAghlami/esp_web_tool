@@ -1,17 +1,24 @@
 import { FORMATS, type Format } from '../serial/port-manager';
-import { BAUD_RATES, type Source } from './flash-pane';
+import { BAUD_RATES } from './flash-pane';
 import { LINE_ENDINGS } from './monitor-pane';
 
 /**
  * Settings remembered by this browser (SPEC §10), in localStorage. `last` is what was used
  * most recently and what the page starts with. Each USB device (vid:pid) also gets a full copy,
- * restored when that device is connected again, so every board keeps its own flash plan
- * source and monitor setup. Picked files are not remembered: the browser drops access to them.
+ * restored when that device is connected again, so every board keeps its own manifest and
+ * monitor setup. Picked files are not remembered: the browser drops access to them.
  */
 export interface Settings {
   last: DeviceSettings;
+  /** Layout, kept per browser only: connecting a device moves focus to the monitor anyway. */
+  ui: UiSettings;
   /** Keyed by `describePort()` ("303a:1001"), most recently used last. */
   devices: Record<string, DeviceSettings>;
+}
+
+export interface UiSettings {
+  pane: 'flash' | 'monitor';
+  fullscreen: boolean;
 }
 
 export interface DeviceSettings {
@@ -20,9 +27,8 @@ export interface DeviceSettings {
 }
 
 export interface FlashSettings {
-  source: Source;
-  repo: string;
-  url: string;
+  /** The Manifest field when it holds a URL or owner/repo (a picked file can't be kept). */
+  manifest: string;
   baud: number;
   eraseAll: boolean;
   verify: boolean;
@@ -50,9 +56,7 @@ export const MAX_DEVICES = 32;
 export function defaultDeviceSettings(): DeviceSettings {
   return {
     flash: {
-      source: 'files',
-      repo: '',
-      url: '',
+      manifest: '',
       baud: 921600,
       eraseAll: false,
       verify: true,
@@ -63,7 +67,7 @@ export function defaultDeviceSettings(): DeviceSettings {
 }
 
 export function defaultSettings(): Settings {
-  return { last: defaultDeviceSettings(), devices: {} };
+  return { last: defaultDeviceSettings(), ui: { pane: 'flash', fullscreen: false }, devices: {} };
 }
 
 type Obj = Record<string, unknown>;
@@ -83,9 +87,7 @@ function parseDevice(v: unknown): DeviceSettings {
   const m = obj(obj(v).monitor);
   return {
     flash: {
-      source: oneOf(f.source, ['files', 'github', 'url'] as const, d.flash.source),
-      repo: str(f.repo, d.flash.repo),
-      url: str(f.url, d.flash.url),
+      manifest: str(f.manifest, d.flash.manifest),
       baud: oneOf(f.baud, BAUD_RATES as readonly number[], d.flash.baud),
       eraseAll: bool(f.eraseAll, d.flash.eraseAll),
       verify: bool(f.verify, d.flash.verify),
@@ -116,7 +118,15 @@ export function parseSettings(json: string | null): Settings {
   for (const [key, v] of Object.entries(obj(o.devices)).slice(-MAX_DEVICES)) {
     if (/^[0-9a-f]{4}:[0-9a-f]{4}$/.test(key)) devices[key] = parseDevice(v);
   }
-  return { last: parseDevice(o.last), devices };
+  const ui = obj(o.ui);
+  return {
+    last: parseDevice(o.last),
+    ui: {
+      pane: oneOf(ui.pane, ['flash', 'monitor'] as const, 'flash'),
+      fullscreen: bool(ui.fullscreen, false),
+    },
+    devices,
+  };
 }
 
 /** Records `s` for `key`, moving it to the most-recently-used end. */

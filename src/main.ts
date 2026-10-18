@@ -9,6 +9,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import { WebglAddon } from '@xterm/addon-webgl';
 import { Terminal } from '@xterm/xterm';
 import { App, type DemoMode } from './app/app';
+import { browserFiles } from './browser/files';
 import { darkTheme } from './tui/theme';
 import { XtermTty } from './tty/xterm-tty';
 
@@ -47,6 +48,12 @@ async function copyText(text: string, refocus: () => void): Promise<void> {
     refocus();
     if (!ok) throw err;
   }
+}
+
+/** `?manifest=` (or `?repo=`) fills the Manifest field and loads it. */
+function manifestFromUrl(): string | undefined {
+  const q = new URLSearchParams(location.search);
+  return q.get('manifest') ?? q.get('repo') ?? undefined;
 }
 
 /** `?demo` starts the synthetic log stream, `?demo=flood` at about 2 Mbaud. */
@@ -138,6 +145,9 @@ async function main(): Promise<void> {
     copy: (text) => copyText(text, () => term.focus()),
     storage: localStorageOrNone(),
     demo: demoFromUrl(),
+    files: browserFiles,
+    assetProxy: import.meta.env.VITE_ASSET_PROXY as string | undefined,
+    manifest: manifestFromUrl(),
   });
   app.start();
   term.focus();

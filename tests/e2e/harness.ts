@@ -1,4 +1,5 @@
 import { expect, type Page } from '@playwright/test';
+import { installFakeFiles } from './fake-files';
 import { installFakeSerial } from './fake-serial';
 
 export interface ReadyInfo {
@@ -33,6 +34,11 @@ export async function openApp(
     return route.fulfill({ status: 204 });
   });
   await page.addInitScript(installFakeSerial);
+  await page.addInitScript(installFakeFiles);
+  // Hermetic: the GitHub API answers 404 unless a test routes it (later routes win).
+  await page.route('https://api.github.com/**', (route) =>
+    route.fulfill({ status: 404, headers: { 'access-control-allow-origin': '*' }, body: '{}' }),
+  );
   await page.addInitScript((settle: boolean) => {
     const timer = setInterval(() => {
       const term = (window as any).__espwt?.term;

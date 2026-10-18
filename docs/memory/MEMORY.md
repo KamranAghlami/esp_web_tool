@@ -1,3 +1,4 @@
 - [GitHub release CORS](github-release-cors.md) — release assets can't be fetched from the browser; API listing can
 - [Playwright user activation](playwright-user-activation.md) — evaluate/exposeBinding/goto grant activation; gesture tests must settle first
 - [Dev environment](dev-environment.md) — 1-core VM, no GPU: browser perf numbers here are worst case
+- [Working with the user](working-with-the-user.md) — rapid UI feedback on a Mac; record every decision in SPEC.md and docs/CLAUDE.md

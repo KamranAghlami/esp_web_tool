@@ -91,7 +91,8 @@ test.describe('app', () => {
     const text = (await screenText(page)).join('\n');
     expect(text).toContain('Flash');
     expect(text).toContain('Monitor');
-    expect(text).toContain('Parts · example');
+    expect(text).toContain('Manifest');
+    expect(text).toContain('+ add file');
     expect(text).toContain('not connected');
   });
 
@@ -271,9 +272,8 @@ test.describe('app', () => {
   });
 
   test('settings are remembered across reloads, and per USB device', async ({ page }) => {
-    // Last-used settings stick in this browser: flash source and repo, monitor setup.
-    await page.keyboard.press('s'); // source → GitHub
-    await page.keyboard.press('Tab');
+    // Last-used settings stick in this browser: the manifest, monitor setup, pane, fullscreen.
+    await page.keyboard.press('Shift+Tab'); // the Manifest field
     await page.keyboard.type('espressif/esp-idf');
     await page.keyboard.press('Escape');
     await page.keyboard.press('2');
@@ -283,9 +283,12 @@ test.describe('app', () => {
     await page.keyboard.press('s');
     await page.keyboard.press('b');
     await clickText(page, info, '74880');
+    await page.keyboard.press('f'); // monitor fullscreen
     await page.reload();
+    await expectOnScreen(page, '2 Monitor');
+    expect((await screenText(page)).join()).not.toContain('1 Flash');
+    await page.keyboard.press('f');
     await expectOnScreen(page, 'espressif/esp-idf');
-    await page.keyboard.press('2');
     await page.keyboard.press('Control+a');
     await expectOnScreen(page, 'Settings: 74880 8N1 LF ▸');
     expect(await page.evaluate(() => (window as any).__espwt.app.monitor.colorize)).toBe(false);
@@ -304,7 +307,7 @@ test.describe('app', () => {
 
     // Meanwhile another repo is typed (it becomes the last used)...
     await page.keyboard.press('1');
-    await page.keyboard.press('Tab');
+    await page.keyboard.press('Shift+Tab');
     await page.keyboard.press('Control+u');
     await page.keyboard.type('someone/else');
     await page.keyboard.press('Escape');
@@ -313,8 +316,82 @@ test.describe('app', () => {
     // ...but connecting the device brings back everything it had.
     await page.keyboard.press('c');
     await expectOnScreen(page, '@ 230400 8N1');
-    await expectOnScreen(page, 'remembered settings');
+    await expectOnScreen(page, 'settings restored');
     await expectOnScreen(page, 'espressif/esp-idf');
+  });
+
+  test('a manifest URL fills the parts table; red rows block flashing until fixed', async ({
+    page,
+  }) => {
+    const manifest = {
+      name: 'Demo FW',
+      version: '1.0',
+      sets: [
+        {
+          id: 'one',
+          name: 'ESP32-C5',
+          parts: [
+            { path: 'bootloader.bin', offset: '0x2000', locked: true },
+            { path: 'app.bin', offset: '0x10000' },
+            { path: 'missing.bin', offset: '0x200000' },
+          ],
+        },
+      ],
+    };
+    const cors = { 'access-control-allow-origin': '*' };
+    await page.route('https://fw.test/**', (route) => {
+      const name = new URL(route.request().url()).pathname.split('/').pop();
+      if (name === 'esp-web-tool.json')
+        return route.fulfill({ headers: cors, body: JSON.stringify(manifest) });
+      if (name === 'bootloader.bin' || name === 'app.bin')
+        return route.fulfill({ headers: cors, body: Buffer.alloc(4096, 0xe9) });
+      return route.fulfill({ status: 404, headers: cors, body: '' });
+    });
+    await page.keyboard.press('Shift+Tab');
+    await page.keyboard.type('fw.test/demo'); // a folder URL: esp-web-tool.json is looked up
+    await page.keyboard.press('Enter');
+    await expectOnScreen(page, 'Demo FW 1.0 (esp-web-tool)');
+    await expectOnScreen(page, 'bootloader.bin (locked)');
+    await expectOnScreen(page, 'not found (404)');
+    await page.keyboard.press('F');
+    await expectOnScreen(page, 'Fix the red rows first (missing.bin');
+
+    await page.keyboard.press('d'); // Enter moved focus to the parts table; this row is locked
+    await expectOnScreen(page, 'bootloader.bin is locked by the manifest');
+    await page.keyboard.press('G'); // the "+ add file" line
+    await page.keyboard.press('k'); // missing.bin
+    await page.keyboard.press('d');
+    await expect.poll(async () => (await screenText(page)).join()).not.toContain('missing.bin');
+
+    // Add a local file, then move it.
+    await page.evaluate(() => (window as any).__picks.push([{ name: 'extra.bin', size: 300 }]));
+    await page.keyboard.press('a');
+    await expectOnScreen(page, '0x020000  extra.bin');
+    await page.keyboard.press('G');
+    await page.keyboard.press('k');
+    await page.keyboard.press('e');
+    await page.keyboard.press('Control+u');
+    await page.keyboard.type('300000');
+    await page.keyboard.press('Enter');
+    await expectOnScreen(page, '0x300000  extra.bin');
+    await page.keyboard.press('F');
+    await expectOnScreen(page, 'Flash (simulated)');
+  });
+
+  test('a picked local manifest reads its parts once its folder is granted', async ({ page }) => {
+    const manifest = { sets: [{ id: 'a', parts: [{ path: 'app.bin', offset: 65536 }] }] };
+    await page.evaluate(
+      (text) => (window as any).__picks.push([{ name: 'esp-web-tool.json', text }]),
+      JSON.stringify(manifest),
+    );
+    await page.keyboard.press('Shift+Tab');
+    await page.keyboard.press('Enter'); // empty field: the file picker
+    await expectOnScreen(page, 'needs folder access (o)');
+    await expectOnScreen(page, 'grant its folder');
+    await page.evaluate(() => ((window as any).__folder = [{ name: 'app.bin', size: 2048 }]));
+    await page.keyboard.press('o'); // focus is on the parts table after Enter
+    await expectOnScreen(page, '2.0 KiB');
+    expect((await screenText(page)).join()).not.toContain('needs folder access');
   });
 
   test('help scrolls with the mouse wheel', async ({ page }) => {
@@ -344,7 +421,7 @@ test.describe('app', () => {
     await page.keyboard.press('f');
     await expectOnScreen(page, '2 Monitor');
     await page.keyboard.press('F');
-    await expectOnScreen(page, 'Flash (simulated)');
+    await expectOnScreen(page, 'No parts to flash');
   });
 
   test('draws on the alternate screen, which survives resizes without drifting', async ({
@@ -372,12 +449,10 @@ test.describe('app', () => {
   });
 
   test('text input captures hotkeys while focused', async ({ page }) => {
-    await page.keyboard.press('s'); // source → GitHub
-    await expectOnScreen(page, 'Repo');
-    await page.keyboard.press('Tab'); // focus the repo field
+    await page.keyboard.press('Shift+Tab'); // parts table → Manifest field
     await page.keyboard.type('espressif/esp-idf');
     await expectOnScreen(page, 'espressif/esp-idf');
-    // "c" and "f" were typed into the field, not treated as Connect/Flash.
+    // "c" and "f" were typed into the field, not treated as Connect/Fullscreen.
     const spike = await page.evaluate(() => (window as any).__espwt.app.spike);
     expect(spike).toEqual([]);
   });

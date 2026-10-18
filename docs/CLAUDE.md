@@ -12,8 +12,20 @@ Browser-based TUI (feels like a CLI running through ttyd) for flashing Espressif
 - `src/app/` — the program: panes, keymap, overlays
 - `src/monitor/` — headless-xterm `TermPane` (blitted into the monitor pane), demo stream
 - `src/serial/` — `PortManager`, the single owner of the `SerialPort`
+- `src/flash/` — the flash plan: manifest parser + adapters, Manifest-field targets, GitHub releases, `FlashPlan` (rows, red rows, locks). No DOM: it talks to the browser through `FileHost`
+- `src/browser/` — DOM-side implementations (`files.ts`: pickers, folder access, fetch)
+- `src/app/settings.ts` — what is remembered in `localStorage`: last used, per USB device, layout
 
-The app never touches the DOM except in `src/main.ts` (and, later, `src/browser/`). Gesture-gated browser calls (`requestPort`, file pickers) must run synchronously from input dispatch.
+The app never touches the DOM except in `src/main.ts` and `src/browser/`. Gesture-gated browser calls (`requestPort`, file and folder pickers) must run synchronously from input dispatch.
+
+## UI conventions (decided with the user; details in SPEC §4)
+
+- Everything is drawn inside the terminal: no DOM overlays, no floating toasts. Messages replace the key hints in the bottom bar.
+- Capital letters for actions that can't be undone (`F` flash, `E` erase, `Ctrl+A C` clear). `f` is fullscreen.
+- Menus are pop-ups centered on the pane they belong to. Submenus have a `‹ Back` row, and Esc/Backspace go back (not ←).
+- Every keyboard action also works with the mouse, and every view is tested at desktop size (phones later, §4.1).
+- The app draws on the alternate screen (`?1049h`); without it, resizes leave stale lines.
+- Settings are remembered: as last used, per USB vid:pid (manifest + monitor), and per browser for layout (pane, fullscreen).
 
 ## Commands
 

@@ -29,8 +29,7 @@ describe('settings', () => {
     store.save(s);
     expect(mem.writes).toBe(0);
     s.last.monitor.baud = 460800;
-    s.last.flash.source = 'github';
-    s.last.flash.repo = 'espressif/esp-idf';
+    s.last.flash.manifest = 'espressif/esp-idf';
     rememberDevice(s.devices, '303a:1001', s.last);
     store.save(s);
     expect(mem.writes).toBe(1);
@@ -40,8 +39,8 @@ describe('settings', () => {
   it('copies a device snapshot, so later edits to `last` do not leak into it', () => {
     const s = defaultSettings();
     rememberDevice(s.devices, '303a:1001', s.last);
-    s.last.flash.repo = 'changed';
-    expect(s.devices['303a:1001']!.flash.repo).toBe('');
+    s.last.flash.manifest = 'changed';
+    expect(s.devices['303a:1001']!.flash.manifest).toBe('');
   });
 
   it('falls back to defaults for junk, field by field', () => {
@@ -49,14 +48,14 @@ describe('settings', () => {
     const s = parseSettings(
       JSON.stringify({
         last: {
-          flash: { source: 'ftp', repo: 'a/b', baud: 123, verify: false },
+          flash: { manifest: 'a/b', repo: 'old field', baud: 123, verify: false },
           monitor: { baud: -5, format: '9X9', eol: 7, colorize: false },
         },
         devices: { 'bad key': {}, '10c4:ea60': { monitor: { baud: 74880, format: '7E1' } } },
       }),
     );
     const d = defaultDeviceSettings();
-    expect(s.last.flash).toEqual({ ...d.flash, repo: 'a/b', verify: false });
+    expect(s.last.flash).toEqual({ ...d.flash, manifest: 'a/b', verify: false });
     expect(s.last.monitor).toEqual({ ...d.monitor, colorize: false });
     expect(Object.keys(s.devices)).toEqual(['10c4:ea60']);
     expect(s.devices['10c4:ea60']!.monitor).toMatchObject({ baud: 74880, format: '7E1' });

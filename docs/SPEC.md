@@ -138,18 +138,15 @@ interface FlashPlan {
 ┌─ ESP Web Tool ──────────────────────────────────────────────────────────── v0.1.0 · a1b2c3d ─┐
 │ PORT ● CP2102N (10c4:ea60)   CHIP ESP32-S3 (QFN56) rev v0.2   FLASH 8MB   MAC 34:85:18:aa:bb:cc │
 ├─ Flash ─────────────────────────────────────────┬─ Monitor ── 115200 8N1 ── LF ── ts:off ──────┤
-│ Source  (•) Files   ( ) GitHub   ( ) URL        │ I (312) cpu_start: Starting scheduler.      │
-│                                                 │ I (318) main: hello world                   │
-│ Repo    [ KamranAghlami/my-fw              ]    │ W (402) wifi: no AP configured              │
-│ ┌ Releases ──────────┐┌ Sets ──────────────────┐│                                              │
-│ │▶v1.2.0  2026-10-01 ││▶ESP32-S3 8MB  (chip ✓) ││                                              │
-│ │ v1.1.0  2026-08-12 ││ ESP32-C3 4MB           ││                                              │
-│ │ v1.1.0-rc1  pre    ││ ESP32 4MB  (merged)    ││                                              │
-│ └────────────────────┘└────────────────────────┘│                                              │
+│ Manifest [KamranAghlami/my-fw          ] Open…  │ I (312) cpu_start: Starting scheduler.      │
+│ Release   v1.2.0 ▾   Set  ESP32-S3 8MB (chip ✓) ▾ │ I (318) main: hello world                   │
+│ My Firmware 1.2.0 · 3 sets                      │ W (402) wifi: no AP configured              │
 │ ┌ Parts ─────────────────────────────────────┐  │                                              │
 │ │ [x] 0x000000  bootloader.bin      21.3 KiB │  │                                              │
 │ │ [x] 0x008000  partition-table.bin  3.0 KiB │  │                                              │
 │ │ [x] 0x010000  my-fw.bin            1.2 MiB │  │                                              │
+│ │ [x] 0x110000  storage.bin   not found (404)│  │  ← red: blocks F                             │
+│ │ + add file                                 │  │                                              │
 │ └────────────────────────────────────────────┘  │                                              │
 │ Baud [921600▾] Erase all [ ] Verify [x] Reset after [x]                                       │
 │ my-fw.bin   ███████████████▌               52%  612 KiB/s                                     │
@@ -203,8 +200,8 @@ A browser tab is a hostile terminal. Chrome **does not let pages intercept** `Ct
 | `c` | Connect / disconnect port |
 | `F` | Start flash (confirm dialog with the plan summary) |
 | `E` | Erase entire flash (confirm) |
-| `s` | Cycle source: Files / GitHub / URL |
-| `a` / `d` / `e` / `o` | Parts table: add file / delete row / edit offset / open folder (TUI file browser) |
+| `Enter` in the Manifest field | Load what it holds (URL, folder URL, GitHub repo); on an empty field, open the file picker |
+| `a` / `d` / `e` / `r` / `o` | Parts table: add files / delete row / edit offset (also `Enter`) / replace the row's file / grant the manifest's folder. `Space` toggles a row |
 | `Enter` on the Monitor pane | Enter the monitor: **from here every key goes to the device** |
 | `Ctrl+]` | Leave the monitor (back to hotkeys) |
 | `Ctrl+A` | Monitor menu: a centered pop-up that lists its keys and is clickable (live, or with the Monitor pane focused). `r` reset, `b` boot mode, `C` clear, `s` settings ▸ (`b` baud ▸, `f` format 8N1/8E1/7E1… ▸, `e` line ending ▸), `h` log-level colors, `f` fullscreen, `Ctrl+A` send a literal `Ctrl+A`, `?` help; later: `d` DTR, `t` timestamps, `l` save log. Menus open centered on the pane they belong to. Submenus have a `‹ Back` row; Esc and Backspace go back. Current values show in the menu labels and the status line (`303a:1001 @ 115200 8N1`), not in the pane header. |
@@ -237,23 +234,45 @@ Every action can also be done with the mouse:
 3. Show in the status line: chip, revision, features, crystal, MAC, detected flash size.
 4. If the bootloader cannot be reached: offer "hold BOOT, tap RESET, retry" instructions (needed for ESP32-S2 native USB, and for boards without auto-reset).
 
-### 5.2 Source: Files (manual)
-- Add files with the picker, drag & drop, or by dropping a whole folder.
-- Each row has an offset (hex input, `0x` optional), a filename, a size and an enable checkbox.
-- **Smart offsets** for a newly added file, from its name:
-  - `bootloader*.bin` → chip bootloader offset (ESP32/S2: `0x1000`; C2/C3/C6/H2/S3: `0x0`; C5/P4: `0x2000`). Until a chip is connected, use `0x0` and flag the row.
-  - `partition*table*.bin` / `partitions.bin` → `0x8000`
-  - `ota_data_initial.bin` → `0xd000`
-  - `*merged*.bin` / `*factory*.bin` → `0x0`
-  - otherwise → `0x10000`
-- **Import `flasher_args.json`** (an ESP-IDF build artifact). If it is dropped together with the binaries, offsets and flash settings are filled in exactly.
-- **Export**: save the current table as one of our manifests (§6), so a hand-made setup can be reused.
+### 5.2 Source: the Manifest field
+There is no source switch (the M0 `Files / GitHub / URL` radio is gone). One editable **Manifest** field says where the plan comes from, and the parts table below it can always be edited by hand.
 
-### 5.3 Source: GitHub
-See §7. The result is a read-only parts table. "Detach to Files" copies it into the manual table if the user wants to edit it.
+**What the field accepts**:
+- **A local manifest file**: the `Open…` button next to the field, or `Enter` on an empty field, opens the file picker. The file is read when the dialog closes. The field then shows the file's name.
+- **A URL ending in `.json`**: fetched as the manifest.
+- **A URL to a folder** (not ending in `.json`): the tool tries `<url>/esp-web-tool.json`, then `manifest.json`, then `flasher_args.json`. The same applies when a picked file's address is edited into a folder URL.
+- **A GitHub repo** (`owner/repo`, `https://github.com/owner/repo`, `…/releases/tag/<tag>`, `…/releases/latest`): its releases are listed and the latest is preselected (no drafts or pre-releases), with a `Release ▾` picker. The manifest is read from the release (§7).
+- **Empty**: a hand-made plan, only the rows you add.
 
-### 5.4 Source: URL
-A direct URL to a manifest (ours, esp-web-tools or `flasher_args.json`) on any CORS-enabled host, e.g. a firmware project's own GitHub Pages. Relative part paths resolve against the manifest URL.
+Text is read on `Enter`, files when the picker closes. A manifest with several sets shows a `Set ▾` picker (later preselected by the detected chip). Flash baud and Erase all come from the set when it gives them.
+
+**Where the bins come from**: `path` is relative to the manifest.
+- **Manifest from a URL**: `new URL(path, manifestUrl)`.
+- **Manifest from a local file**: the browser does not give access to the file's folder. Those rows stay red ("needs folder access") until you press `o` (or click the notice). That opens a folder picker that starts in the manifest's folder (`showDirectoryPicker({ startIn: fileHandle })`), and one click grants it.
+- **Absolute `https://` paths** are fetched as they are.
+
+**Rows can always be edited**, by key or by mouse:
+- Add files with `a` or the `+ add file` row. The picker allows several files; new rows get **smart offsets** from the file name.
+- Delete a row (`d`).
+- Edit the offset with `e`, `Enter` or a click on it. The hex input takes `0x` or no `0x`.
+- Replace the row's file with `r` or a click on the name.
+- Toggle a row with `Space` or a click on `[x]`.
+
+The only exception is **rows the manifest locks** (§6: `"locked": true` on a part, or on a set to lock all of its parts). They can't be deleted, replaced, re-offset or disabled, and they show `locked`.
+
+**Red rows**: a row whose file can't be read is red with the reason. Reasons include 404, blocked by CORS, needs folder access, an empty file, a `sha256` mismatch, and needing the asset proxy. `F` refuses to start while any enabled row is red or still loading. Fix it by replacing the file, granting the folder, or disabling or deleting the row (if it isn't locked).
+
+**Smart offsets** for an added file, from its name:
+- `bootloader*.bin` → chip bootloader offset (ESP32/S2: `0x1000`; C2/C3/C6/H2/S3: `0x0`; C5/P4: `0x2000`). Until a chip is connected, use `0x0` and flag the row.
+- `partition*table*.bin` / `partitions.bin` → `0x8000`
+- `ota_data_initial.bin` → `0xd000`
+- `*merged*.bin` / `*factory*.bin` → `0x0`
+- otherwise → `0x10000`, or the first 64 KiB boundary after the last row
+
+**Later**:
+- Drag and drop of files or folders onto the terminal.
+- Export the table as one of our manifests (§6).
+- Remember a picked manifest file across reloads (its handle can be kept in IndexedDB).
 
 ### 5.5 Validation (before the flash button is enabled)
 - **Error**: overlapping regions; a part extends past the detected flash size; an empty file; no parts enabled.
@@ -310,6 +329,7 @@ Rules:
 - `offset`: a hex string or a non-negative integer.
 - `path`: a **bare filename** means a release asset with that name in the same release (or a path relative to the manifest URL in URL mode). An **absolute `https://` URL** is fetched as is (it must be CORS-enabled).
 - `sha256` (optional): checked after download, before flashing.
+- `locked` (optional, default `false`): on a part, the user can't delete, replace, re-offset or disable it. On a set, it applies to all of that set's parts. Extra rows can still be added.
 - Unknown fields are ignored, which keeps the format forward compatible. A larger `manifestVersion` → warn and try anyway.
 
 **Adapters** (read only, converted to our model):
@@ -319,7 +339,7 @@ Rules:
 ## 7. GitHub integration
 
 ### 7.1 Input
-These forms are accepted in the Repo field or the `?repo=` deep-link parameter:
+These forms are accepted in the Manifest field (§5.2) and in the `?manifest=` / `?repo=` deep-link parameters:
 - `owner/repo`
 - `https://github.com/owner/repo` (with or without a trailing path)
 - `https://github.com/owner/repo/releases/tag/<tag>` → preselects that tag
@@ -364,7 +384,7 @@ If no proxy is configured, the UI goes straight to Manual assist and explains wh
 - Release assets do not change for a given tag and filename, so the proxy caches aggressively: edge cache plus an optional R2 copy keyed by `{owner}/{repo}/{tag}/{name}`. GitHub then sees about one fetch per asset per region, not one per user.
 - Self-hosting stays possible (`VITE_ASSET_PROXY` / Settings), and firmware repos that care can use the Pages-mirror pattern and skip the proxy.
 
-So a generic "any public repo" flasher needs a proxy. For a firmware repo that cooperates, the T-SDR-C5 pattern also works with strategy 1: its manifest uses absolute `https://<owner>.github.io/<repo>/…` part URLs (and the manifest itself can be loaded through the URL source, §5.4). The producer workflow (§12) should offer both outputs: release assets, and a Pages mirror.
+So a generic "any public repo" flasher needs a proxy. For a firmware repo that cooperates, the T-SDR-C5 pattern also works with strategy 1: its manifest uses absolute `https://<owner>.github.io/<repo>/…` part URLs (and the manifest itself can be loaded by URL in the Manifest field, §5.2). The producer workflow (§12) should offer both outputs: release assets, and a Pages mirror.
 
 ## 8. Serial monitor
 
@@ -407,20 +427,20 @@ There is a single `PortManager`. Only one consumer holds the port at a time.
 ## 10. Deep links and settings
 
 Query parameters (they can be combined):
-- `?repo=owner/repo` — open the GitHub source with this repo
+- `?manifest=<anything the Manifest field accepts>` (§5.2), loaded on open; `?repo=owner/repo` is an alias
 - `&tag=v1.2.0` or `&tag=latest`
 - `&set=esp32s3-8mb` — preselect the set (if it matches the chip, flashing is one `Ctrl+F` away)
-- `?manifest=https://…/esp-web-tool.json` — URL source
 - `&baud=921600&monitor=115200`
 - `?demo` or `?demo=flood`: a synthetic ESP-IDF log stream in the monitor, for trying it without a device (`flood` is about a saturated 2 Mbaud link; the e2e throughput test uses it). No key starts it.
 
 The tool never starts flashing from a link alone; the user always confirms.
 
 Settings live in `localStorage`, so every browser (each computer or phone) keeps its own. Best effort: blocked or full storage just means nothing sticks. They are saved after each input that changes them (`src/app/settings.ts`, key `esp-web-tool:settings:v2`). Every field is validated on load and falls back to its default.
-- **What is remembered**: flash source, repo and manifest URL fields, flash baud, Erase all / Verify / Reset after, monitor baud / format / line ending, log-level colors.
+- **What is remembered**: the Manifest field (when it holds a URL or `owner/repo`), flash baud, Erase all / Verify / Reset after, monitor baud / format / line ending, log-level colors.
+- **Layout**: the active pane and fullscreen, per browser only, not per device (connecting a device moves focus to the monitor anyway).
 - **Last used**: the page starts with whatever was used most recently.
-- **Per USB device**: a full copy of all of the above is also kept per `vid:pid` (the 32 most recent devices). It is restored when that device is connected again, so each board keeps its own flash source and monitor setup, and the message says "remembered settings". A device seen for the first time keeps the current setup. Web Serial exposes no serial number, so two boards with the same USB ids (e.g. two native-USB ESP32-C5s, both `303a:1001`) share one entry.
-- **Not remembered**: picked files. The browser drops access to them on reload; only a granted folder (`showDirectoryPicker`, §3.1) can be kept, in IndexedDB.
+- **Per USB device**: a full copy of all of the above is also kept per `vid:pid` (the 32 most recent devices). It is restored when that device is connected again (a remembered manifest is loaded again), so each board keeps its own manifest and monitor setup, and the message says "(settings restored)". A device seen for the first time keeps the current setup. Web Serial exposes no serial number, so two boards with the same USB ids (e.g. two native-USB ESP32-C5s, both `303a:1001`) share one entry.
+- **Not remembered**: picked files, including a picked manifest file. The browser drops access to them on reload; only a granted folder (`showDirectoryPicker`, §3.1) can be kept, in IndexedDB.
 - **Later**: theme, auto-monitor, timestamps, asset proxy URL, recent repos (last 10).
 - URL parameters override remembered settings for that visit.
 
@@ -455,11 +475,11 @@ Settings live in `localStorage`, so every browser (each computer or phone) keeps
 | # | Scope | Done when |
 |---|---|---|
 | M0 ✅ | Scaffold (Vite/TS), `Tty` + input parser, Screen/diff renderer, layout + core widgets, keymap, help overlay, CI + Pages deploy. **Spike**: `requestPort()` from a key and from a mouse click via xterm `onData`; headless-terminal blit performance at 2 Mbaud | The empty shell is live on Pages, CI is green, and the spike passes |
-| M1 | PortManager, connect + chip info, Files source, validation, flash/verify/reset, erase (`E`), dump flash to a file (`D`) | A local IDF build flashes onto ESP32 and ESP32-S3 |
+| M1 | **Started 2026-10-18**: the Manifest field (local file + folder grant, URL, folder URL, GitHub release listing), manifest parser + adapters, editable parts table with red rows and locks, `?manifest=`. **Next**: connect + chip info, validation, flash/verify/reset, erase (`E`), dump flash to a file (`D`) | A local IDF build flashes onto ESP32 and ESP32-S3 |
 | M2 | Serial monitor, port handoff, native-USB reconnect | Flash → auto-monitor works on a native-USB chip |
 | M2b | **Phones**: compact size class, touch bridge, extra-keys bar, soft-keyboard handling, WebUSB + `web-serial-polyfill` fallback with the CDC-only notice, Android device emulation in e2e | Flash + monitor a native-USB ESP32 from an Android phone over OTG |
-| M3 | GitHub source, manifest + adapters, Manual assist download, deep links | A real release with `esp-web-tool.json` flashes via manual assist |
-| M4 | Asset proxy + its workflow, URL source, JSON Schema, producer workflow docs | One-click flash from a release link |
+| M3 | GitHub release files through the asset proxy (once the rate limit is settled), Manual assist download, release notes | A real release with `esp-web-tool.json` flashes via manual assist |
+| M4 | Proxy hardening (caching, limits) and self-hosting docs, JSON Schema, producer workflow docs | One-click flash from a release link |
 | M5 | Polish: light theme, log save, error hints, accessibility pass, installable app (PWA) | — |
 
 ### M0 findings (2026-10-17)
@@ -497,15 +517,22 @@ Settings live in `localStorage`, so every browser (each computer or phone) keeps
   - `f` is Fullscreen everywhere, `F` is Flash (capitals = cannot be undone), and Ctrl+A `C` clears.
 - **Seventh pass (2026-10-18)**: everything (flash and monitor) is remembered as "last used" and per USB device. Picked files can't be kept.
 - **DevTools artifact (2026-10-18)**: after opening and closing DevTools in Chrome on macOS, the frame sat one row low with a stale border line on top. The app had been drawing on the normal screen since the fake shell was removed. xterm reflows the normal screen on resize, and its view can stop short of the bottom. Fixed by going back to the alternate screen (`?1049h`: no scrollback, no reflow) and scrolling to the bottom after every refit.
+- **Eighth pass (2026-10-18), M1 started**:
+  - The Source radio became one Manifest field (§5.2): local file + folder grant, URL, folder URL, GitHub release listing.
+  - The parts table is editable by key and mouse; red rows block `F`; the manifest can lock rows.
+  - The active pane and fullscreen are remembered.
+  - The message says "(settings restored)".
+  - Focus starts on the parts table, and Enter in the Manifest field moves focus there.
 
 ## 15. Open questions
 
 0. **Phones**: which Android phone(s) will you test with? That decides whether we can rely on native Web Serial (M149+, device-dependent) or only on the polyfill. Do your target boards use native USB or CP210x/CH340 bridges?
 
-1. **CORS strategy**: are you OK with running a Cloudflare Worker proxy (free tier, your account)? The alternatives are: Manual assist only, or requiring firmware repos to publish binaries to their own Pages (which makes the "GitHub release" flow less central).
+1. **CORS strategy**: decided (2026-10-18): **build the asset proxy** (§7.4), **once the rate-limit concern is settled**. Until then, GitHub release files show as red rows ("needs the asset proxy"), and URL manifests on CORS-enabled hosts work fully.
 2. **Where the manifest lives**: "in the release's root" could mean (a) a **release asset** (this draft), or (b) a file at the **repo root at the release tag**, fetched via `raw.githubusercontent.com`, which *is* CORS-enabled. (b) gets the manifest past CORS without a proxy, but the binaries would still need one. Should we support both?
-3. **Manifest filename**: `esp-web-tool.json`? Something shorter?
+3. **Manifest filename**: `esp-web-tool.json` (matches the repo name) is what the code looks for. It was once written as `esp-web-tools.json`, but that is close to esp-web-tools' own project name and easy to confuse with it. Confirm the name.
 4. ~~Rendering~~: decided, a real TUI inside xterm.js (§3).
-5. **Asset download strategy** (§7.4): postponed. Start with the no-proxy paths; decide on the proxy later.
+5. **Asset download strategy** (§7.4): proxy decided (see 1); waiting on the rate-limit discussion.
+5b. **Proxy rate limit**: settle the concern before building the proxy (§7.4 lists the mitigations).
 6. **Optional GitHub token** for higher rate limits and private repos: in scope for v1 or later?
 7. ~~Package manager and license~~: npm and MIT for M0 (easy to change).

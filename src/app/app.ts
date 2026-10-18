@@ -29,6 +29,7 @@ import { stringWidth } from '../tui/width';
 import { BAUD_RATES, FlashPane, formatSize } from './flash-pane';
 import { HELP } from './help';
 import { LINE_ENDINGS, MonitorPane } from './monitor-pane';
+import type { FileHost } from '../flash/host';
 import {
   type KeyValueStore,
   type DeviceSettings,
@@ -81,6 +82,12 @@ export interface AppOptions {
   copy?: (text: string) => Promise<void>;
   /** Where settings are remembered (localStorage in the page); none means nothing sticks. */
   storage?: KeyValueStore;
+  /** File pickers, folder access and fetch for the flash plan (`src/browser/files.ts`). */
+  files: FileHost;
+  /** Asset proxy base URL for GitHub release files (SPEC §7.4); none until it exists. */
+  assetProxy?: string;
+  /** Manifest field value from the URL (`?manifest=`, `?repo=`); loaded on start. */
+  manifest?: string;
   /**
    * Synthetic log stream into the monitor, for trying it without a device and for the
    * throughput test. Only from the URL (`?demo`, `?demo=flood`); no key starts it.
@@ -91,14 +98,15 @@ export interface AppOptions {
 export class App {
   readonly tty: Tty;
   readonly theme: Theme;
-  readonly flash = new FlashPane();
+  readonly flash: FlashPane;
   readonly monitor = new MonitorPane();
   readonly ports: PortManager;
   readonly spike: SpikeRecord[] = [];
 
   /** Which pane has focus, and which widget inside the flash pane. */
   pane: 'flash' | 'monitor' = 'flash';
-  private flashFocus = 0;
+  /** The focused widget in the Flash pane (null until the pane exists: the parts table). */
+  private flashFocus: Focusable | null = null;
   private zoomed = false;
   /** Where the panes were last drawn, to center their menus on them. */
   private rects: { main: Rect | null; flash: Rect | null; monitor: Rect | null } = {
@@ -141,6 +149,34 @@ export class App {
     this.schedule = opts.schedule ?? ((fn) => requestAnimationFrame(fn));
     this.openUrl = opts.openUrl ?? (() => {});
     this.copy = opts.copy ?? (() => Promise.resolve());
+    this.flash = new FlashPane(opts.files, this.invalidate, opts.assetProxy);
+    this.flash.parts.onNotify = (text, kind) => this.notify(text, kind);
+    // After Enter in the Manifest field, the table is where the next keys belong.
+    this.flash.onSubmitted = () => this.focusWidget(this.flash.parts);
+    this.flash.release.onOpen = () => {
+      const plan = this.flash.plan;
+      this.openMenu(
+        'Release',
+        (plan.releases ?? []).map((r, i) => ({
+          label: `${r.tag}  ${r.date}${r.prerelease ? '  pre' : ''}${r.draft ? '  draft' : ''}`,
+          checked: i === plan.releaseIndex,
+          action: () => plan.selectRelease(i),
+        })),
+        { within: this.rects.flash ?? undefined },
+      );
+    };
+    this.flash.set.onOpen = () => {
+      const plan = this.flash.plan;
+      this.openMenu(
+        'Set',
+        (plan.manifest?.sets ?? []).map((set, i) => ({
+          label: set.chip && set.chip !== set.name ? `${set.name}  (${set.chip})` : set.name,
+          checked: i === plan.setIndex,
+          action: () => plan.selectSet(i),
+        })),
+        { within: this.rects.flash ?? undefined },
+      );
+    };
     this.monitor.onCopy = (text) => {
       const n = [...text].length;
       this.copy(text).then(
@@ -163,11 +199,13 @@ export class App {
       onState: (s, detail) => this.onPortState(s, detail),
     });
     this.flash.onSimDone = () => this.notify('Simulated run finished (nothing was written)', 'ok');
-    this.flash.source.onChange = () => (this.flashFocus = 0);
     this.startDemo = opts.demo ?? 'off';
     this.store = new SettingsStore(opts.storage);
     this.settings = this.store.load();
     this.applySettings(this.settings.last);
+    this.pane = this.settings.ui.pane;
+    this.zoomed = this.settings.ui.fullscreen;
+    if (opts.manifest) this.useManifest(opts.manifest);
 
     this.tty.onData((d) => this.onData(d));
     this.tty.onResize(() => {
@@ -227,27 +265,29 @@ export class App {
   /** Puts a remembered snapshot into the widgets and the port manager. */
   private applySettings({ flash, monitor }: DeviceSettings): void {
     const f = this.flash;
-    f.source.value = flash.source;
-    f.repo.setValue(flash.repo);
-    f.url.setValue(flash.url);
+    if (flash.manifest !== f.manifest.value) this.useManifest(flash.manifest);
     f.baud.index = Math.max(0, BAUD_RATES.indexOf(flash.baud as (typeof BAUD_RATES)[number]));
     f.eraseAll.checked = flash.eraseAll;
     f.verify.checked = flash.verify;
     f.resetAfter.checked = flash.resetAfter;
-    this.flashFocus = Math.min(this.flashFocus, f.focusables().length - 1);
     this.ports.baudRate = monitor.baud;
     this.ports.format = monitor.format;
     this.monitor.eol = monitor.eol;
     if (this.monitor.colorize !== monitor.colorize) this.monitor.toggleColorize();
   }
 
+  /** Put `text` in the Manifest field and load it (empty clears the field only). */
+  private useManifest(text: string): void {
+    this.flash.manifest.setValue(text);
+    if (text.trim()) void this.flash.plan.load(text);
+  }
+
   private snapshot(): DeviceSettings {
     const f = this.flash;
     return {
       flash: {
-        source: f.source.value,
-        repo: f.repo.value,
-        url: f.url.value,
+        // A picked file's name can't be reopened after a reload, so it isn't kept.
+        manifest: f.manifest.value === f.plan.localName ? '' : f.manifest.value,
         baud: f.baud.value,
         eraseAll: f.eraseAll.checked,
         verify: f.verify.checked,
@@ -266,6 +306,7 @@ export class App {
   private saveSettings(): void {
     const s = this.settings;
     s.last = this.snapshot();
+    s.ui = { pane: this.pane, fullscreen: this.zoomed };
     const key = this.ports.port && portKey(this.ports.port);
     if (key && this.ports.state === 'open') rememberDevice(s.devices, key, s.last);
     this.store.save(s);
@@ -303,8 +344,8 @@ export class App {
       return;
     }
     if (focus?.capturesText) {
-      if (e.name === 'escape') this.cycleFocus(1);
-      else focus.handleKey(e);
+      // The widget may use Esc itself (e.g. to cancel an inline edit); otherwise it leaves.
+      if (!focus.handleKey(e) && e.name === 'escape') this.cycleFocus(1);
       return;
     }
     if (this.hotkey(e)) return;
@@ -329,9 +370,6 @@ export class App {
         return true;
       case 'E':
         this.notify('Erase arrives with esptool-js in M1', 'info');
-        return true;
-      case 's':
-        this.flash.source.cycle();
         return true;
       case '1':
         this.focusPane('flash');
@@ -572,8 +610,9 @@ export class App {
 
   private focused(): Focusable | null {
     if (this.pane === 'monitor') return this.monitor;
+    // A widget that went away (e.g. the Set picker of a one-set manifest) falls back to the table.
     const list = this.flash.focusables();
-    return list[Math.min(this.flashFocus, list.length - 1)] ?? null;
+    return this.flashFocus && list.includes(this.flashFocus) ? this.flashFocus : this.flash.parts;
   }
 
   private cycleFocus(d: number): void {
@@ -584,7 +623,7 @@ export class App {
       this.pane = 'monitor';
     } else {
       this.pane = 'flash';
-      this.flashFocus = next;
+      this.flashFocus = ring[next]!;
     }
   }
 
@@ -597,10 +636,9 @@ export class App {
       this.pane = 'monitor';
       return;
     }
-    const i = this.flash.focusables().indexOf(w as Focusable);
-    if (i >= 0) {
+    if (this.flash.focusables().includes(w as Focusable)) {
       this.pane = 'flash';
-      this.flashFocus = i;
+      this.flashFocus = w as Focusable;
     }
   }
 
@@ -654,7 +692,7 @@ export class App {
           this.saveSettings();
           this.notify(
             `Connected ${describePort(port)} @ ${ports.baudRate} ${ports.format}` +
-              (known ? ' (remembered settings)' : ''),
+              (known ? ' (settings restored)' : ''),
             'ok',
           );
         });
@@ -673,19 +711,21 @@ export class App {
 
   private startFlash(): void {
     if (this.flash.running) return;
-    const parts = this.flash.parts.items.filter((p) => p.enabled);
-    if (parts.length === 0) {
-      this.notify('No parts enabled', 'warn');
+    const plan = this.flash.plan;
+    const problem = plan.problem();
+    if (problem) {
+      this.notify(problem, 'warn');
       return;
     }
-    const total = parts.reduce((n, p) => n + p.size, 0);
+    const parts = plan.rows.filter((p) => p.enabled);
+    const total = parts.reduce((n, p) => n + p.data!.length, 0);
     this.overlay = {
       kind: 'confirm',
       title: 'Flash (simulated)',
       body: [
         `${parts.length} parts · ${formatSize(total)} · ${this.flash.baud.value} baud`,
         '',
-        'M0 has no flasher yet: this only animates the progress bar.',
+        'There is no flasher yet: this only animates the progress bar.',
         'Nothing is sent to any device.',
         '',
         'Continue?  y / n',
@@ -941,13 +981,26 @@ export class App {
       ];
     }
     const connected = this.ports.port !== null;
+    const parts = this.flash.parts;
+    // The parts table's own keys go in the middle, in place of the focus/pane hints.
+    const local: KeyHint[] =
+      this.pane === 'flash' && this.focused() === parts && !parts.capturesText
+        ? [
+            { key: 'a', label: 'Add', action: () => parts.add() },
+            { key: 'd', label: 'Delete' },
+            { key: 'e', label: 'Offset' },
+            { key: 'r', label: 'Replace' },
+            { key: 'Space', label: 'On/off' },
+          ]
+        : [
+            { key: 'Tab', label: 'Focus' },
+            { key: '1/2', label: 'Pane' },
+          ];
     return [
       { key: 'c', label: connected ? 'Disconnect' : 'Connect', action: () => this.toggleConnect() },
       { key: 'F', label: 'Flash', action: () => this.startFlash() },
       { key: 'E', label: 'Erase' },
-      { key: 's', label: 'Source', action: () => this.flash.source.cycle() },
-      { key: 'Tab', label: 'Focus' },
-      { key: '1/2', label: 'Pane' },
+      ...local,
       { key: 'f', label: 'Fullscreen', action: () => this.toggleFullscreen() },
       { key: '⏎', label: 'Monitor', action: () => (this.focusPane('monitor'), this.enterLive()) },
       { key: 'D', label: 'Dump' },

@@ -4,12 +4,14 @@ Flash and monitor Espressif chips from your browser, in a full-screen terminal U
 
 **Live:** https://kamranaghlami.github.io/esp_web_tool/ (Chrome, Edge or Opera on desktop; uses Web Serial)
 
-> Status: **M0** — terminal UI shell, serial connect and a raw serial monitor. Flashing
-> (esptool-js) arrives in M1; the flash pane currently shows an example plan and a
-> simulated run. See [docs/SPEC.md](docs/SPEC.md) for the full design and milestones.
+> Status: **M1 in progress**. Done: terminal UI, serial monitor, and the flash plan (Manifest
+> field, editable parts table). Next: writing to the chip with esptool-js; until then F only
+> simulates a run. See [docs/SPEC.md](docs/SPEC.md) for the full design and milestones.
 
 ## Try it
 
+- Manifest field: a URL, a folder URL or `owner/repo`, then `Enter`; or `Enter` on an empty field to pick a local manifest. `?manifest=…` in the page URL does the same
+- Parts table: `a` add files, `d` delete, `e` offset, `r` replace, `Space` on/off; red rows block flashing
 - `c` connect a serial port, `Enter` on the Monitor pane to type to the device, `Ctrl-]` to leave
 - `Ctrl-A` opens the monitor menu: `r` reset, `b` boot mode, `s` baud, `f` format (8N1…), `e` line ending
 - No device at hand? Open the page with `?demo` for a synthetic log stream
