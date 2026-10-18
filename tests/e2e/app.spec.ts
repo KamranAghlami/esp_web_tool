@@ -1,5 +1,5 @@
 import { expect, type Page, test } from '@playwright/test';
-import { cellCenter, expectOnScreen, openApp, screenText } from './harness';
+import { cellCenter, expectOnScreen, openApp, type ReadyInfo, screenText } from './harness';
 
 const spikeOf = (page: Page) => page.evaluate(() => (window as any).__espwt.app.spike);
 
@@ -65,9 +65,24 @@ test.describe('M0 spike: requestPort() from terminal input', () => {
   });
 });
 
+/** Cell (col, row) where `text` first appears on screen. */
+async function find(page: Page, text: string): Promise<{ col: number; row: number }> {
+  const lines = await screenText(page);
+  const row = lines.findIndex((l) => l.includes(text));
+  expect(row, `"${text}" on screen`).toBeGreaterThanOrEqual(0);
+  return { col: lines[row]!.indexOf(text), row };
+}
+
+async function clickText(page: Page, info: ReadyInfo, text: string): Promise<void> {
+  const { col, row } = await find(page, text);
+  const p = cellCenter(info, col, row);
+  await page.mouse.click(p.x, p.y);
+}
+
 test.describe('app', () => {
+  let info: ReadyInfo;
   test.beforeEach(async ({ page }) => {
-    await openApp(page);
+    info = await openApp(page);
     await expectOnScreen(page, 'ESP Web Tool');
   });
 
@@ -138,6 +153,88 @@ test.describe('app', () => {
     ]);
   });
 
+  test('Ctrl+A opens the monitor menu in live mode, and ? there opens the help', async ({
+    page,
+  }) => {
+    await page.keyboard.press('c');
+    await expectOnScreen(page, 'hello from fake port');
+    await page.keyboard.press('Enter');
+    await page.keyboard.press('Control+a');
+    await expectOnScreen(page, 'Monitor · Ctrl-A');
+    await expectOnScreen(page, 'Boot (download) mode');
+    await page.keyboard.press('?');
+    await expectOnScreen(page, 'Help · Esc to close');
+  });
+
+  test('baud and line ending are picked from dropdowns', async ({ page }) => {
+    await clickText(page, info, '115200▾');
+    await expectOnScreen(page, 'Monitor baud');
+    await clickText(page, info, '460800 ');
+    await expectOnScreen(page, '460800▾');
+    await clickText(page, info, 'LF▾');
+    await clickText(page, info, 'CRLF');
+    await expectOnScreen(page, 'CRLF▾');
+    // The flash pane's ‹ value › opens a list too.
+    await clickText(page, info, '921600');
+    await expectOnScreen(page, 'Flash baud');
+    await page.keyboard.press('Escape');
+    await expect.poll(async () => (await screenText(page)).join()).not.toContain('Flash baud');
+  });
+
+  test('the title and version open the repository and its releases', async ({ page }) => {
+    await page.evaluate(() => {
+      (window as any).__opened = [];
+      window.open = ((url: string) => void (window as any).__opened.push(url)) as any;
+    });
+    await clickText(page, info, 'ESP Web Tool');
+    await clickText(page, info, 'v0.1.0');
+    expect(await page.evaluate(() => (window as any).__opened)).toEqual([
+      'https://github.com/KamranAghlami/esp_web_tool',
+      'https://github.com/KamranAghlami/esp_web_tool/releases',
+    ]);
+  });
+
+  test('dragging in the monitor selects buffer text and copies it', async ({ page }) => {
+    await page.evaluate(() => {
+      (window as any).__copied = [];
+      navigator.clipboard.writeText = async (t: string) => void (window as any).__copied.push(t);
+    });
+    await page.keyboard.press('c');
+    await expectOnScreen(page, 'hello from fake port');
+    await page.evaluate(() => (window as any).__serialEmit('first line\r\nsecond line\r\n'));
+    await expectOnScreen(page, 'second line');
+    const a = await find(page, 'hello from fake port');
+    const b = await find(page, 'second line');
+    const from = cellCenter(info, a.col + 'hello '.length, a.row);
+    const to = cellCenter(info, b.col + 'second'.length - 1, b.row);
+    await page.mouse.move(from.x, from.y);
+    await page.mouse.down();
+    await page.mouse.move(to.x, to.y, { steps: 4 });
+    await page.mouse.up();
+    await expect
+      .poll(() => page.evaluate(() => (window as any).__copied))
+      .toEqual(['from fake port\nfirst line\nsecond']);
+    await expectOnScreen(page, 'Copied');
+  });
+
+  test('status line shows rx and tx rates while connected', async ({ page }) => {
+    await page.keyboard.press('c');
+    await expectOnScreen(page, 'hello from fake port');
+    await expectOnScreen(page, '/s · tx ');
+  });
+
+  test('help scrolls with the mouse wheel', async ({ page }) => {
+    await page.setViewportSize({ width: 1000, height: 480 });
+    await page.keyboard.press('?');
+    await expectOnScreen(page, 'Help · Esc to close');
+    await expectOnScreen(page, 'Anywhere');
+    const { col, row } = await find(page, 'Help · Esc');
+    const p = cellCenter(info, col, row + 3);
+    await page.mouse.move(p.x, p.y);
+    await page.mouse.wheel(0, 300);
+    await expect.poll(async () => (await screenText(page)).join('\n')).not.toContain('Anywhere');
+  });
+
   test('help overlay opens and closes', async ({ page }) => {
     await page.keyboard.press('?');
     await expectOnScreen(page, 'Help · Esc to close');
@@ -178,11 +275,11 @@ test.describe('app', () => {
     await page.waitForTimeout(3000);
     const stats = await page.evaluate(() => (window as any).__espwt.app.stats);
     console.log(
-      `demo flood: ${stats.fps} fps, ${(stats.bytesPerSec / 1024).toFixed(0)} KiB/s into the monitor`,
+      `demo flood: ${stats.fps} fps, ${(stats.rxPerSec / 1024).toFixed(0)} KiB/s into the monitor`,
     );
     // Smoke thresholds only: headless Chromium paints in software, so this measures a worst
     // case (see SPEC §14, M0 findings). The JS pipeline itself is benchmarked in term-pane.test.ts.
-    expect(stats.bytesPerSec).toBeGreaterThan(50 * 1024);
+    expect(stats.rxPerSec).toBeGreaterThan(50 * 1024);
     expect(stats.fps).toBeGreaterThanOrEqual(5);
   });
 });

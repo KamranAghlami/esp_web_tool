@@ -5,10 +5,19 @@ import type { Tty } from '../tty/tty';
 import { HitMap, type Ctx } from '../tui/context';
 import { centered, cols, rows } from '../tui/layout';
 import { Renderer, type CursorState } from '../tui/renderer';
-import { Screen, type Rect } from '../tui/screen';
-import { Attr } from '../tui/style';
+import { contains, Screen, type Rect } from '../tui/screen';
+import { Attr, type Style } from '../tui/style';
 import { darkTheme, type Theme } from '../tui/theme';
-import { dialog, type Focusable, keyBar, type KeyHint, spinner } from '../tui/widgets';
+import {
+  type Anchor,
+  dialog,
+  type Focusable,
+  keyBar,
+  type KeyHint,
+  Menu,
+  type MenuItem,
+  spinner,
+} from '../tui/widgets';
 import { stringWidth, truncate } from '../tui/width';
 import { BAUD_RATES, FlashPane, formatSize } from './flash-pane';
 import { HELP } from './help';
@@ -19,13 +28,18 @@ export const MIN_ROWS = 24;
 /** Below this width the panes are shown one at a time. */
 export const SPLIT_COLS = 120;
 
+export const REPO_URL = 'https://github.com/KamranAghlami/esp_web_tool';
+/** Monitor baud choices: slow ROM/legacy rates, then the flasher's. */
+const MONITOR_BAUDS = [9600, 19200, 38400, 57600, 74880, ...BAUD_RATES];
+
 /** Mouse tracking (button + drag, SGR encoding), bracketed paste, window title. */
 const ENTER_APP = '\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b]0;ESP Web Tool\x07';
 
 type Toast = { text: string; kind: 'info' | 'ok' | 'warn' | 'error'; until: number };
 type Overlay =
   | { kind: 'help'; scroll: number }
-  | { kind: 'confirm'; title: string; body: string[]; onYes: () => void };
+  | { kind: 'confirm'; title: string; body: string[]; onYes: () => void }
+  | { kind: 'menu'; menu: Menu };
 type DemoMode = 'off' | 'normal' | 'flood';
 
 /** How a gesture-gated browser call was triggered, for the M0 spike (SPEC §3.1). */
@@ -42,6 +56,10 @@ export interface AppOptions {
   now?: () => number;
   /** Schedules a frame; defaults to requestAnimationFrame. */
   schedule?: (fn: () => void) => void;
+  /** Opens a link in a new tab. Called from input dispatch, so popups are allowed. */
+  openUrl?: (url: string) => void;
+  /** Puts text on the clipboard. */
+  copy?: (text: string) => Promise<void>;
 }
 
 export class App {
@@ -58,7 +76,8 @@ export class App {
   private zoomed = false;
   private overlay: Overlay | null = null;
   private toasts: Toast[] = [];
-  private prefix = false;
+  /** Where the monitor pane was last drawn, to anchor its menu. */
+  private monRect: Rect | null = null;
 
   private parser = new InputParser();
   private renderer = new Renderer();
@@ -66,6 +85,8 @@ export class App {
   private frameQueued = false;
   private now: () => number;
   private schedule: (fn: () => void) => void;
+  private openUrl: (url: string) => void;
+  private copy: (text: string) => Promise<void>;
   private lastTrigger: 'key' | 'mouse' = 'key';
 
   private demo: DemoMode = 'off';
@@ -73,9 +94,10 @@ export class App {
   private demoStream = new DemoStream();
 
   /** Stats for the status line (and the e2e perf check). */
-  stats = { fps: 0, bytesPerSec: 0 };
+  stats = { fps: 0, rxPerSec: 0, txPerSec: 0 };
   private frames = 0;
-  private statBytes = 0;
+  private statRx = 0;
+  private statTx = 0;
   private statTimer: ReturnType<typeof setInterval>;
 
   constructor(opts: AppOptions) {
@@ -83,6 +105,25 @@ export class App {
     this.theme = opts.theme ?? darkTheme;
     this.now = opts.now ?? (() => performance.now());
     this.schedule = opts.schedule ?? ((fn) => requestAnimationFrame(fn));
+    this.openUrl = opts.openUrl ?? (() => {});
+    this.copy = opts.copy ?? (() => Promise.resolve());
+    this.monitor.onCopy = (text) => {
+      const n = [...text].length;
+      this.copy(text).then(
+        () => this.toast(`Copied ${n} character${n === 1 ? '' : 's'}`, 'ok'),
+        (err: unknown) => this.toast(`Copy failed: ${errorText(err)}`, 'error'),
+      );
+    };
+    this.flash.baud.onPick = (anchor) =>
+      this.openMenu(
+        'Flash baud',
+        BAUD_RATES.map((b, i) => ({
+          label: String(b),
+          checked: i === this.flash.baud.index,
+          action: () => (this.flash.baud.index = i),
+        })),
+        anchor,
+      );
     this.ports = new PortManager({
       onData: (bytes) => this.monitor.write(bytes, () => this.invalidate()),
       onState: (s, detail) => this.onPortState(s, detail),
@@ -119,10 +160,12 @@ export class App {
   };
 
   private sampleStats(): void {
-    const bytes = this.monitor.pane.bytesIn;
-    this.stats = { fps: this.frames, bytesPerSec: bytes - this.statBytes };
+    const rx = this.monitor.bytesIn;
+    const tx = this.ports.bytesOut;
+    this.stats = { fps: this.frames, rxPerSec: rx - this.statRx, txPerSec: tx - this.statTx };
     this.frames = 0;
-    this.statBytes = bytes;
+    this.statRx = rx;
+    this.statTx = tx;
     if (this.demo !== 'off' || this.ports.state === 'open') this.invalidate();
   }
 
@@ -173,6 +216,10 @@ export class App {
   }
 
   private hotkey(e: KeyEvent): boolean {
+    if (e.ctrl && e.name === 'a' && this.pane === 'monitor') {
+      this.openMonitorMenu();
+      return true;
+    }
     if (e.ctrl || e.alt) return false;
     switch (e.name) {
       case 'c':
@@ -214,6 +261,10 @@ export class App {
 
   private overlayKey(e: KeyEvent): void {
     const o = this.overlay!;
+    if (o.kind === 'menu') {
+      o.menu.handleKey(e);
+      return;
+    }
     if (o.kind === 'help') {
       if (e.name === 'escape' || e.name === 'q' || e.name === '?' || e.name === 'enter')
         this.overlay = null;
@@ -235,80 +286,119 @@ export class App {
       this.send(e.text.replace(/\r?\n/g, this.monitor.lineEnding.value));
       return;
     }
-    if (this.prefix) {
-      this.prefix = false;
-      this.monitorMenu(e);
-      return;
-    }
     if (e.ctrl && e.name === ']') {
       this.monitor.live = false;
       return;
     }
     if (e.ctrl && e.name === 'a') {
-      this.prefix = true;
+      this.openMonitorMenu();
       return;
     }
     this.monitor.pane.scrollToBottom();
     this.send(e.name === 'enter' ? this.monitor.lineEnding.value : e.raw);
   }
 
-  private monitorMenu(e: KeyEvent): void {
+  private openMenu(title: string, items: MenuItem[], anchor: Anchor): Menu {
+    const menu = new Menu(title, items, anchor, () => {
+      if (this.overlay?.kind === 'menu' && this.overlay.menu === menu) this.overlay = null;
+    });
+    this.overlay = { kind: 'menu', menu };
+    return menu;
+  }
+
+  /** The Ctrl+A menu: opens above the bottom-left corner of the monitor pane. */
+  private openMonitorMenu(): void {
+    const open = this.ports.state === 'open';
+    const m = this.monitor;
+    const r = this.monRect;
+    const menu = this.openMenu(
+      'Monitor · Ctrl-A',
+      [
+        { key: 'r', label: 'Reset chip', action: () => this.resetChip() },
+        { key: 'b', label: 'Boot (download) mode', action: () => this.bootMode() },
+        { key: 'c', label: 'Clear', action: () => m.clear() },
+        {
+          key: 'e',
+          label: `Line ending: ${m.lineEnding.label} ▸`,
+          action: () => this.openEolMenu(),
+        },
+        { key: 's', label: `Baud: ${this.ports.baudRate} ▸`, action: () => this.openBaudMenu() },
+        { key: '+', label: 'Baud up', action: () => this.stepBaud(1) },
+        { key: '-', label: 'Baud down', action: () => this.stepBaud(-1) },
+        {
+          key: 'h',
+          label: 'Log level colors',
+          checked: m.colorize,
+          action: () => this.toggleColors(),
+        },
+        {
+          key: 'z',
+          label: 'Zoom pane',
+          checked: this.zoomed,
+          action: () => (this.zoomed = !this.zoomed),
+        },
+        { key: '^A', label: 'Send Ctrl-A', action: () => open && this.send('\x01') },
+        { key: '?', label: 'Help', action: () => (this.overlay = { kind: 'help', scroll: 0 }) },
+      ],
+      { x: r ? r.x : 1, y: this.tty.rows - 3 },
+    );
+    menu.selected = 0; // an action menu, not a choice: start at the top
+  }
+
+  private openBaudMenu(anchor?: Anchor): void {
+    this.openMenu(
+      'Monitor baud',
+      MONITOR_BAUDS.map((b) => ({
+        label: String(b),
+        checked: b === this.ports.baudRate,
+        action: () => this.setMonitorBaud(b),
+      })),
+      anchor ?? { x: this.monRect?.x ?? 1, y: this.tty.rows - 3 },
+    );
+  }
+
+  private openEolMenu(anchor?: Anchor): void {
+    this.openMenu(
+      'Line ending',
+      LINE_ENDINGS.map((l, i) => ({
+        label: l.label,
+        checked: i === this.monitor.eol,
+        action: () => (this.monitor.eol = i),
+      })),
+      anchor ?? { x: this.monRect?.x ?? 1, y: this.tty.rows - 3 },
+    );
+  }
+
+  private resetChip(): void {
+    if (this.ports.state !== 'open') return this.toast('Connect a port first (c)', 'warn');
+    void this.ports.reset().then(() => this.toast('Reset sent', 'ok'));
+  }
+
+  private bootMode(): void {
     const ports = this.ports;
-    const open = ports.state === 'open';
-    switch (e.ctrl ? `^${e.name}` : e.name) {
-      case '^a':
-        this.send('\x01');
-        break;
-      case 'r':
-        if (open) void ports.reset().then(() => this.toast('Reset sent', 'ok'));
-        break;
-      case 'b':
-        if (open)
-          void ports
-            .enterBootloader()
-            .then(() =>
-              this.toast(
-                `Boot mode sequence sent (${ports.usbJtag ? 'USB-JTAG' : 'DTR/RTS'})`,
-                'ok',
-              ),
-            );
-        break;
-      case 'c':
-        this.monitor.clear();
-        break;
-      case 'h':
-        this.monitor.toggleColorize();
-        this.toast(`Log level colors: ${this.monitor.colorize ? 'on' : 'off'}`, 'info');
-        break;
-      case 'e':
-        this.monitor.eol = (this.monitor.eol + 1) % LINE_ENDINGS.length;
-        this.toast(`Line ending: ${this.monitor.lineEnding.label}`, 'info');
-        break;
-      case '+':
-      case '=':
-      case '-': {
-        const list = [9600, 19200, 38400, 57600, 74880, ...BAUD_RATES];
-        const i = list.indexOf(ports.baudRate);
-        const next = list[Math.max(0, Math.min(list.length - 1, i + (e.name === '-' ? -1 : 1)))]!;
-        if (open) void ports.setBaud(next).then(() => this.toast(`Baud: ${next}`, 'info'));
-        else ports.baudRate = next;
-        break;
-      }
-      case 'z':
-        this.zoomed = !this.zoomed;
-        break;
-      case 't':
-      case 'l':
-        this.toast('Timestamps and log saving arrive in M2', 'info');
-        break;
-      case 'escape':
-        break;
-      default:
-        this.toast(
-          '^A menu: r reset · b boot · c clear · e line end · h colors · +/- baud · z zoom',
-          'info',
-        );
-    }
+    if (ports.state !== 'open') return this.toast('Connect a port first (c)', 'warn');
+    void ports
+      .enterBootloader()
+      .then(() =>
+        this.toast(`Boot mode sequence sent (${ports.usbJtag ? 'USB-JTAG' : 'DTR/RTS'})`, 'ok'),
+      );
+  }
+
+  private toggleColors(): void {
+    this.monitor.toggleColorize();
+    this.toast(`Log level colors: ${this.monitor.colorize ? 'on' : 'off'}`, 'info');
+  }
+
+  private stepBaud(d: number): void {
+    const i = MONITOR_BAUDS.indexOf(this.ports.baudRate);
+    this.setMonitorBaud(MONITOR_BAUDS[Math.max(0, Math.min(MONITOR_BAUDS.length - 1, i + d))]!);
+  }
+
+  private setMonitorBaud(baud: number): void {
+    const ports = this.ports;
+    if (ports.state === 'open')
+      void ports.setBaud(baud).then(() => this.toast(`Baud: ${baud}`, 'info'));
+    else ports.baudRate = baud;
   }
 
   private send(data: string): void {
@@ -528,9 +618,9 @@ export class App {
 
     // Frame: title, status, pane header, panes, separator, key bar, bottom.
     screen.box({ x: 0, y: 0, w: W, h: H }, border);
-    screen.text(2, 0, ' ESP Web Tool ', { fg: theme.title, attrs: Attr.Bold });
-    const ver = ` v${__APP_VERSION__} · ${__GIT_SHA__} `;
-    screen.text(W - 2 - stringWidth(ver), 0, ver, { fg: theme.dim });
+    this.link(ctx, 2, 0, 'ESP Web Tool', REPO_URL, { fg: theme.title, attrs: Attr.Bold });
+    const ver = `v${__APP_VERSION__} · ${__GIT_SHA__}`;
+    this.link(ctx, W - 3 - stringWidth(ver), 0, ver, `${REPO_URL}/releases`, { fg: theme.dim });
     this.drawStatus(ctx, { x: 2, y: 1, w: W - 4, h: 1 });
 
     const main: Rect = { x: 1, y: 3, w: W - 2, h: H - 6 };
@@ -567,10 +657,10 @@ export class App {
         this.flash.render(ctx, flashRect!, this.pane === 'flash' ? focus : null),
       );
     }
+    this.monRect = monRect;
     if (monRect) {
       const live = this.monitor.live;
       const title = live ? 'Monitor ● LIVE' : 'Monitor';
-      const info = `${this.ports.baudRate} 8N1 · ${this.monitor.lineEnding.label}`;
       const end = this.paneTitle(
         ctx,
         monRect.x,
@@ -579,7 +669,12 @@ export class App {
         '2',
         live ? theme.borderLive : undefined,
       );
-      screen.text(end + 1, 2, ` ${info} `, { fg: theme.dim });
+      // Clickable settings in the pane header: ` 115200▾ 8N1 · LF▾ `.
+      let x = screen.text(end + 1, 2, ' ', {});
+      x = this.dropdown(ctx, x, String(this.ports.baudRate), (a) => this.openBaudMenu(a));
+      x = screen.text(x, 2, ' 8N1 · ', { fg: theme.dim });
+      x = this.dropdown(ctx, x, this.monitor.lineEnding.label, (a) => this.openEolMenu(a));
+      screen.text(x, 2, ' ', {});
       ctx.hits.add(monRect, (e) => e.action === 'down' && this.focusPane('monitor'));
       screen.withClip(monRect, () => this.monitor.render(ctx, monRect!));
     }
@@ -587,6 +682,30 @@ export class App {
     keyBar(ctx, { x: 2, y: H - 2, w: W - 4, h: 1 }, this.hints());
     this.drawToasts(ctx, main);
     if (this.overlay) this.drawOverlay(ctx);
+  }
+
+  /** Underlined text that opens `url` when clicked, set into a border with a space each side. */
+  private link(ctx: Ctx, x: number, y: number, text: string, url: string, style: Style): void {
+    const { screen } = ctx;
+    screen.text(x, y, ' ', {});
+    const end = screen.text(x + 1, y, text, {
+      ...style,
+      attrs: (style.attrs ?? 0) | Attr.Underline,
+    });
+    screen.text(end, y, ' ', {});
+    ctx.hits.add(
+      { x: x + 1, y, w: end - x - 1, h: 1 },
+      (e) => e.action === 'down' && this.openUrl(url),
+    );
+  }
+
+  /** `value▾` that opens a menu below itself when clicked; returns the column after it. */
+  private dropdown(ctx: Ctx, x: number, value: string, open: (a: Anchor) => void): number {
+    const { screen, theme } = ctx;
+    let end = screen.text(x, 2, value, { fg: theme.fg });
+    end = screen.text(end, 2, '▾', { fg: theme.dim });
+    ctx.hits.add({ x, y: 2, w: end - x, h: 1 }, (e) => e.action === 'down' && open({ x, y: 2 }));
+    return end;
   }
 
   /** Writes `─ 1 Flash ─` into the pane header row; returns the column after it. */
@@ -640,31 +759,26 @@ export class App {
     screen.text(x, r.y, '— (detection in M1)', { fg: theme.dim });
 
     const showRate = this.demo !== 'off' || p.state === 'open';
+    const { rxPerSec, txPerSec, fps } = this.stats;
     const right = showRate
-      ? `${this.demo !== 'off' ? `demo:${this.demo} ` : ''}rx ${formatSize(this.stats.bytesPerSec)}/s · ${this.stats.fps} fps`
+      ? `${this.demo !== 'off' ? `demo:${this.demo} ` : ''}rx ${formatSize(rxPerSec)}/s · tx ${formatSize(txPerSec)}/s · ${fps} fps`
       : '';
     if (right) screen.text(r.x + r.w - stringWidth(right), r.y, right, { fg: theme.dim });
   }
 
   private hints(): KeyHint[] {
-    if (this.monitor.live && this.prefix) {
+    if (this.overlay?.kind === 'menu') {
       return [
-        { key: 'r', label: 'Reset' },
-        { key: 'b', label: 'Boot' },
-        { key: 'c', label: 'Clear' },
-        { key: 'e', label: 'Line end' },
-        { key: 'h', label: 'Colors' },
-        { key: '+/-', label: 'Baud' },
-        { key: 'z', label: 'Zoom' },
-        { key: '^A', label: 'Send ^A' },
-        { key: 'Esc', label: 'Cancel' },
+        { key: '↑↓', label: 'Move' },
+        { key: '⏎', label: 'Select' },
+        { key: 'Esc', label: 'Close', action: () => (this.overlay = null) },
       ];
     }
     if (this.monitor.live) {
       return [
         { key: 'LIVE', label: 'keys go to the device' },
         { key: '^]', label: 'Leave', action: () => (this.monitor.live = false) },
-        { key: '^A', label: 'Menu', action: () => (this.prefix = true) },
+        { key: '^A', label: 'Menu', action: () => this.openMonitorMenu() },
       ];
     }
     const connected = this.ports.port !== null;
@@ -710,6 +824,10 @@ export class App {
   private drawOverlay(ctx: Ctx): void {
     const o = this.overlay!;
     const { screen, theme } = ctx;
+    if (o.kind === 'menu') {
+      o.menu.render(ctx);
+      return;
+    }
     if (o.kind === 'confirm') {
       const w = Math.max(...o.body.map(stringWidth), stringWidth(o.title)) + 6;
       const inner = dialog(ctx, o.title, w, o.body.length + 4, theme.warn);
@@ -721,6 +839,13 @@ export class App {
     const lines = HELP;
     const h = Math.min(lines.length + 4, screen.rows - 4);
     const inner = dialog(ctx, 'Help · Esc to close', 70, h);
+    // Wheel scrolls anywhere; a click outside the dialog closes it.
+    const outer = { x: inner.x - 1, y: inner.y - 1, w: inner.w + 2, h: inner.h + 2 };
+    ctx.hits.add({ x: 0, y: 0, w: screen.cols, h: screen.rows }, (e) => {
+      if (e.action === 'wheelup') o.scroll = Math.max(0, o.scroll - 3);
+      else if (e.action === 'wheeldown') o.scroll += 3;
+      else if (e.action === 'down' && !contains(outer, e.x, e.y)) this.overlay = null;
+    });
     const body = rows(inner, [1, { flex: 1 }, 1])[1]!;
     o.scroll = Math.max(0, Math.min(o.scroll, lines.length - body.h));
     lines.slice(o.scroll, o.scroll + body.h).forEach(([k, d], i) => {

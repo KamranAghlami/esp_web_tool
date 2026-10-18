@@ -207,13 +207,18 @@ A browser tab is a hostile terminal. Chrome **does not let pages intercept** `Ct
 | `a` / `d` / `e` / `o` | Parts table: add file / delete row / edit offset / open folder (TUI file browser) |
 | `Enter` on the Monitor pane | Enter the monitor: **from here every key goes to the device** |
 | `Ctrl+]` | Leave the monitor (back to hotkeys) |
-| `Ctrl+A` then key | Monitor menu: `r` reset, `b` boot mode, `c` clear, `e` cycle line ending, `h` log-level colors, `+`/`-` baud, `z` zoom, `Ctrl+A` send a literal `Ctrl+A`; later: `d` DTR, `s` RTS, `t` timestamps, `l` save log |
+| `Ctrl+A` | Monitor menu, a pop-up that lists its keys and is clickable (live, or with the Monitor pane focused): `r` reset, `b` boot mode, `c` clear, `e` line ending ▸, `s` baud ▸, `+`/`-` baud up/down, `h` log-level colors, `z` zoom, `Ctrl+A` send a literal `Ctrl+A`, `?` help; later: `d` DTR, `t` timestamps, `l` save log |
 | `z` | Zoom / unzoom the focused pane |
 | `D` | Demo log stream: off → normal → flood (about 2 Mbaud); for trying the monitor without a device |
 | `?` | Help overlay listing all keys |
 | `Esc` | Close dialog or overlay, cancel the current input |
 
-Every action can also be done with the mouse: click to focus or select, the wheel scrolls, and the key-bar entries are clickable.
+Every action can also be done with the mouse:
+- Click to focus or select. The wheel scrolls lists, the monitor and the help.
+- Key-bar entries are clickable.
+- Settings shown as `value▾` (monitor baud and line ending in the pane header) open a dropdown menu. A `‹ value ›` picker steps with its arrows and opens the full list when you click the value.
+- The title links to the repository and the version to its releases. Links are underlined and opened with `window.open` from the click.
+- **Selection**: dragging in the monitor selects text tmux-style. The selection is anchored to the buffer (an xterm marker), so it stays on the same text while output streams in. Dragging past the edge scrolls. It is copied to the clipboard on release, through the Clipboard API with an `execCommand('copy')` fallback. Shift-drag (Option-drag on macOS) is xterm's own screen selection, for anything else on screen.
 
 ### Visual style
 - Colors are **terminal palette entries** (16 ANSI + a few truecolor accents), defined as an xterm `ITheme`. The default dark theme is a low-saturation background with green/amber/cyan accents. A light theme follows `prefers-color-scheme`.
@@ -359,6 +364,7 @@ So a generic "any public repo" flasher needs a proxy. For a firmware repo that c
 
 ## 8. Serial monitor
 
+- The status line shows the rx and tx rates while a port is open or the demo runs.
 - Device output is parsed by the pane's `@xterm/headless` instance (§3) and drawn inside the TUI, so ANSI colors, cursor moves and clears (ESP-IDF log colors, `menuconfig`-style output, REPLs) behave as they do in a real terminal.
 - **Log-level colors** (on by default, `Ctrl+A h` toggles): plain ESP-IDF lines starting `E (`, `W (` or `I (` are colored red, yellow or green, as `idf.py monitor` does. Firmware built without `CONFIG_LOG_COLORS` (the default in recent ESP-IDF) sends no escape codes of its own. Lines that already start with an escape code pass through untouched. The colorizer works on raw bytes before the terminal parser and holds at most a 3-byte line prefix, released after 30 ms if the device goes quiet (`src/monitor/log-color.ts`).
 - **Input modes**: *raw* (default; each keystroke is sent, which suits REPLs like MicroPython) or *line* (a local edit line, sent on Enter).
@@ -457,6 +463,10 @@ Settings (`localStorage`, best effort): theme, default bauds, auto-monitor, time
   - Plain ESP-IDF logs showed uncolored. Added log-level colors (§8).
   - A black strip appeared at the bottom on first load. xterm.css paints its viewport `#000`, and the pixels below the last whole row showed through. The viewport is now transparent, and the terminal refits when a web font finishes loading.
   - Removed the quit key and the fake shell.
+- **Second laptop pass (2026-10-18)**:
+  - Ctrl+A gave no visible menu; it is now a pop-up with `?` for help.
+  - Shift-drag selection did not do what was wanted. xterm's selection is screen-fixed, so it spans both panes and stays put while the log scrolls; on macOS it needs Option. Added buffer-anchored drag selection in the monitor.
+  - Added: mouse wheel in the help, the title and version as links, a tx rate next to rx, and clickable dropdowns for baud and line ending.
 
 ## 15. Open questions
 

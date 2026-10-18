@@ -30,6 +30,8 @@ export class PortManager {
   port: SerialPort | null = null;
   baudRate = 115200;
   state: PortState = serialSupported() ? 'none' : 'unsupported';
+  /** Bytes written to the device so far (for the tx rate). */
+  bytesOut = 0;
   private reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
   private readLoop: Promise<void> | null = null;
   private encoder = new TextEncoder();
@@ -124,8 +126,10 @@ export class PortManager {
   async write(data: string | Uint8Array): Promise<void> {
     const w = this.port?.writable?.getWriter();
     if (!w) return;
+    const bytes = typeof data === 'string' ? this.encoder.encode(data) : data;
+    this.bytesOut += bytes.length;
     try {
-      await w.write(typeof data === 'string' ? this.encoder.encode(data) : data);
+      await w.write(bytes);
     } finally {
       w.releaseLock();
     }

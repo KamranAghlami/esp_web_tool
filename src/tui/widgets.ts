@@ -375,8 +375,11 @@ export class RadioGroup<T extends string> implements Focusable {
   }
 }
 
-/** `‹ 921600 ›` value picker; left/right cycle through `values`. */
+/** `‹ 921600 ›` value picker; left/right cycle through `values`, a click on the value picks. */
 export class Cycler<T> implements Focusable {
+  /** Called when the value itself is clicked, with the cell below it (to anchor a menu). */
+  onPick?: (anchor: Anchor) => void;
+
   constructor(
     public values: readonly T[],
     public index: number,
@@ -395,7 +398,11 @@ export class Cycler<T> implements Focusable {
     const label = `‹ ${this.format(this.value)} ›`;
     screen.text(r.x, r.y, label, style, r.w);
     const w = stringWidth(label);
-    ctx.hits.add({ x: r.x, y: r.y, w, h: 1 }, () => {}, this);
+    ctx.hits.add(
+      { x: r.x, y: r.y, w, h: 1 },
+      (e) => e.action === 'down' && this.onPick?.({ x: r.x, y: r.y }),
+      this,
+    );
     ctx.hits.add({ x: r.x, y: r.y, w: 2, h: 1 }, (e) => e.action === 'down' && this.step(-1), this);
     ctx.hits.add(
       { x: r.x + w - 2, y: r.y, w: 2, h: 1 },
@@ -413,6 +420,145 @@ export class Cycler<T> implements Focusable {
     if (e.name === 'left' || e.name === 'h') this.step(-1);
     else if (e.name === 'right' || e.name === 'l' || e.name === ' ') this.step(1);
     else return false;
+    return true;
+  }
+}
+
+// ---------------------------------------------------------------------------
+
+/** A cell to open a pop-up from: it opens below the cell, or above if there is no room. */
+export interface Anchor {
+  x: number;
+  y: number;
+}
+
+export interface MenuItem {
+  /** Shortcut, e.g. 'r' or '^A' (Ctrl+A). */
+  key?: string;
+  label: string;
+  checked?: boolean;
+  action: () => void;
+}
+
+/** Modal pop-up list, used for the Ctrl+A menu and for dropdowns such as baud rates. */
+export class Menu {
+  selected: number;
+  private scroll = 0;
+
+  constructor(
+    public title: string,
+    public items: MenuItem[],
+    public anchor: Anchor,
+    private onClose: () => void,
+  ) {
+    this.selected = Math.max(
+      0,
+      items.findIndex((i) => i.checked),
+    );
+  }
+
+  render(ctx: Ctx): void {
+    const { screen, theme } = ctx;
+    const keyW = Math.max(0, ...this.items.map((i) => stringWidth(i.key ?? '')));
+    const labelW = Math.max(...this.items.map((i) => stringWidth(i.label)));
+    // │ ✓ key  label │
+    const w = Math.min(
+      screen.cols,
+      Math.max(stringWidth(this.title) + 6, 4 + 2 + (keyW ? keyW + 2 : 0) + labelW),
+    );
+    const h = Math.min(this.items.length + 2, screen.rows);
+    const x = Math.max(0, Math.min(this.anchor.x, screen.cols - w));
+    const below = this.anchor.y + 1;
+    const y = below + h <= screen.rows ? below : Math.max(0, this.anchor.y - h);
+    const r = { x, y, w, h };
+
+    ctx.hits.add({ x: 0, y: 0, w: screen.cols, h: screen.rows }, (e) => {
+      if (e.action === 'down') this.onClose();
+      else this.handleMouse(e);
+    });
+    screen.fill(r, ' ', { bg: theme.inputBg });
+    const inner = panel(ctx, r, this.title, true, {
+      color: theme.borderFocus,
+      kind: 'rounded',
+      bg: theme.inputBg,
+    });
+
+    const visible = inner.h;
+    if (this.selected < this.scroll) this.scroll = this.selected;
+    if (this.selected >= this.scroll + visible) this.scroll = this.selected - visible + 1;
+    for (let row = 0; row < visible; row++) {
+      const i = this.scroll + row;
+      const item = this.items[i];
+      if (!item) break;
+      const sel = i === this.selected;
+      const bg = sel ? theme.selBg : theme.inputBg;
+      const line = { x: inner.x, y: inner.y + row, w: inner.w, h: 1 };
+      screen.fill(line, ' ', { bg });
+      let cx = screen.text(line.x + 1, line.y, item.checked ? '✓' : ' ', { fg: theme.ok, bg });
+      cx++;
+      if (keyW) {
+        screen.text(cx, line.y, item.key ?? '', { fg: theme.keyFg, bg, attrs: Attr.Bold });
+        cx += keyW + 2;
+      }
+      screen.text(
+        cx,
+        line.y,
+        item.label,
+        { fg: sel ? theme.selFg : theme.fg, bg },
+        inner.x + inner.w - cx,
+      );
+      ctx.hits.add(line, (e) => {
+        if (e.action === 'down') this.choose(i);
+        else this.handleMouse(e);
+      });
+    }
+  }
+
+  private handleMouse(e: MouseEvent): void {
+    if (e.action === 'wheelup') this.move(-1);
+    else if (e.action === 'wheeldown') this.move(1);
+  }
+
+  private move(d: number): void {
+    this.selected = Math.max(0, Math.min(this.items.length - 1, this.selected + d));
+  }
+
+  private choose(i: number): void {
+    const item = this.items[i];
+    // Close first, so an item can open another overlay (a submenu, the help).
+    this.onClose();
+    item?.action();
+  }
+
+  /** Modal: every key is consumed. */
+  handleKey(e: KeyEvent): boolean {
+    const name = e.ctrl ? `^${e.name.toUpperCase()}` : e.name;
+    switch (name) {
+      case 'up':
+      case 'k':
+        this.move(-1);
+        return true;
+      case 'down':
+      case 'j':
+        this.move(1);
+        return true;
+      case 'home':
+        this.selected = 0;
+        return true;
+      case 'end':
+        this.selected = this.items.length - 1;
+        return true;
+      case 'enter':
+      case ' ':
+        this.choose(this.selected);
+        return true;
+      case 'escape':
+      case 'q':
+        this.onClose();
+        return true;
+    }
+    const i = this.items.findIndex((it) => it.key === name);
+    if (i >= 0) this.choose(i);
     return true;
   }
 }

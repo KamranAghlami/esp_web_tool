@@ -94,6 +94,19 @@ export class Screen {
     else if (x + 1 < this.cols && this.chars[i + 1] === CONT) this.chars[i + 1] = ' ';
   }
 
+  /** Restyle the cells in `r` without changing their characters; unset fields are kept. */
+  paint(r: Rect, style: Style): void {
+    for (let y = r.y; y < r.y + r.h; y++) {
+      for (let x = r.x; x < r.x + r.w; x++) {
+        if (!this.inClip(x, y)) continue;
+        const i = y * this.cols + x;
+        if (style.fg !== undefined) this.fg[i] = style.fg;
+        if (style.bg !== undefined) this.bg[i] = style.bg;
+        if (style.attrs !== undefined) this.attrs[i] = style.attrs;
+      }
+    }
+  }
+
   /** Write text starting at (x, y); returns the column after the last character written. */
   text(x: number, y: number, s: string, style: Style = {}, maxWidth = Infinity): number {
     let cx = x;

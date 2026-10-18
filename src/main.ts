@@ -31,6 +31,24 @@ function hasHardwareWebgl(): boolean {
   }
 }
 
+/** Clipboard API first; if it is refused (permissions, unfocused document), execCommand. */
+async function copyText(text: string, refocus: () => void): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (err) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.append(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    refocus();
+    if (!ok) throw err;
+  }
+}
+
 async function main(): Promise<void> {
   // xterm measures the font when it opens; make sure the web font is ready first.
   await Promise.all([
@@ -92,7 +110,11 @@ async function main(): Promise<void> {
   document.fonts.addEventListener('loadingdone', refit);
   refit();
 
-  const app = new App({ tty: new XtermTty(term) });
+  const app = new App({
+    tty: new XtermTty(term),
+    openUrl: (url) => window.open(url, '_blank', 'noopener'),
+    copy: (text) => copyText(text, () => term.focus()),
+  });
   app.start();
   term.focus();
 

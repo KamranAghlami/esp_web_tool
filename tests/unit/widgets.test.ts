@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import type { KeyEvent } from '../../src/tty/input';
+import type { KeyEvent, MouseEvent } from '../../src/tty/input';
 import { HitMap, type Ctx } from '../../src/tui/context';
 import { cols, rows } from '../../src/tui/layout';
 import { Screen } from '../../src/tui/screen';
 import { darkTheme } from '../../src/tui/theme';
-import { ListView, TextInput } from '../../src/tui/widgets';
+import { ListView, Menu, TextInput } from '../../src/tui/widgets';
 import { padEnd, stringWidth, truncate } from '../../src/tui/width';
 
 const k = (name: string, mods: Partial<KeyEvent> = {}): KeyEvent => ({
@@ -84,5 +84,58 @@ describe('ListView', () => {
     list.handleKey(k('k'));
     list.handleKey(k('enter'));
     expect(activated).toBe('item 18');
+  });
+});
+
+const m = (action: MouseEvent['action'], x: number, y: number): MouseEvent => ({
+  type: 'mouse',
+  action,
+  button: 0,
+  x,
+  y,
+  ctrl: false,
+  alt: false,
+  shift: false,
+});
+
+describe('Menu', () => {
+  it('draws items, picks by key or click, and closes first', () => {
+    const log: string[] = [];
+    const menu = new Menu(
+      'Pick',
+      [
+        { key: 'a', label: 'Alpha', action: () => log.push('alpha') },
+        { key: '^A', label: 'Ctrl thing', checked: true, action: () => log.push('ctrl') },
+      ],
+      { x: 30, y: 0 },
+      () => log.push('close'),
+    );
+    const c = ctx();
+    menu.render(c);
+    const rows = Array.from({ length: 5 }, (_, y) => c.screen.rowText(y));
+    expect(rows.join('\n')).toContain('a   Alpha');
+    expect(rows.join('\n')).toContain('✓ ^A  Ctrl thing');
+    expect(menu.selected).toBe(1); // starts on the checked item
+    menu.handleKey(k('a', { ctrl: true }));
+    expect(log).toEqual(['close', 'ctrl']);
+    const y = rows.findIndex((r) => r.includes('Alpha'));
+    c.hits.dispatch(m('down', rows[y]!.indexOf('Alpha'), y));
+    expect(log).toEqual(['close', 'ctrl', 'close', 'alpha']);
+  });
+});
+
+describe('HitMap', () => {
+  it('sends drags and the release to the region that took the press', () => {
+    const hits = new HitMap();
+    const seen: string[] = [];
+    hits.add({ x: 0, y: 0, w: 5, h: 1 }, (e) => seen.push(`left:${e.action}`));
+    hits.add({ x: 5, y: 0, w: 5, h: 1 }, (e) => seen.push(`right:${e.action}`));
+    hits.dispatch(m('down', 1, 0));
+    hits.clear(); // a frame in between keeps the capture
+    hits.add({ x: 5, y: 0, w: 5, h: 1 }, (e) => seen.push(`right:${e.action}`));
+    hits.dispatch(m('drag', 7, 0));
+    hits.dispatch(m('up', 7, 0));
+    hits.dispatch(m('down', 7, 0));
+    expect(seen).toEqual(['left:down', 'left:drag', 'left:up', 'right:down']);
   });
 });

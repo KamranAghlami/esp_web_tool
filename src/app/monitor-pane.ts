@@ -1,6 +1,7 @@
 import { LogColorizer } from '../monitor/log-color';
+import type { IMarker } from '@xterm/headless';
 import { TermPane } from '../monitor/term-pane';
-import type { KeyEvent } from '../tty/input';
+import type { KeyEvent, MouseEvent } from '../tty/input';
 import type { Ctx } from '../tui/context';
 import type { Rect } from '../tui/screen';
 import { Attr } from '../tui/style';
@@ -14,6 +15,24 @@ export const LINE_ENDINGS = [
   { label: 'CRLF', value: '\r\n' },
 ] as const;
 
+/** A cell in the monitor's buffer; `line` is relative to the selection's marker. */
+interface SelPos {
+  line: number;
+  col: number;
+}
+
+/**
+ * Mouse selection, tmux-style: anchored to the buffer (via an xterm marker, which follows
+ * scrolling and scrollback trimming), so it stays on the same text while output streams in.
+ */
+interface Selection {
+  ref: IMarker;
+  a: SelPos;
+  b: SelPos;
+  dragging: boolean;
+  moved: boolean;
+}
+
 /**
  * The monitor's focusable surface. Outside live mode it scrolls the scrollback; in live mode
  * the App sends keystrokes to the device instead of calling handleKey.
@@ -26,6 +45,11 @@ export class MonitorPane implements Focusable {
   active = false;
   /** Color plain ESP-IDF log lines by level (Ctrl+A h toggles). */
   colorize = true;
+  /** Raw bytes received, before coloring (for the rx rate). */
+  bytesIn = 0;
+  /** Called with the selected text when a drag selection ends. */
+  onCopy?: (text: string) => void;
+  private sel: Selection | null = null;
   private hasOutput = false;
   private colorizer = new LogColorizer();
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -37,6 +61,7 @@ export class MonitorPane implements Focusable {
 
   write(data: string | Uint8Array, onParsed: () => void): void {
     this.hasOutput = true;
+    this.bytesIn += data.length;
     if (!this.colorize) {
       this.pane.write(data, onParsed);
       return;
@@ -62,6 +87,7 @@ export class MonitorPane implements Focusable {
   }
 
   clear(): void {
+    this.clearSelection();
     this.pane.clear();
     this.colorizer.reset();
     this.hasOutput = false;
@@ -86,6 +112,7 @@ export class MonitorPane implements Focusable {
       });
     } else {
       this.pane.blit(screen, r);
+      this.paintSelection(ctx, r);
       if (this.pane.scrolledBack) {
         const tag = ' ↑ scrollback · G to bottom ';
         screen.text(r.x + r.w - tag.length, r.y, tag, { fg: theme.selFg, bg: theme.selBg });
@@ -97,19 +124,135 @@ export class MonitorPane implements Focusable {
       }
     }
 
-    ctx.hits.add(
-      r,
-      (e) => {
-        if (e.action === 'wheelup') this.pane.scroll(-3);
-        else if (e.action === 'wheeldown') this.pane.scroll(3);
-      },
-      this,
-    );
+    ctx.hits.add(r, (e) => this.handleMouse(e, r), this);
+  }
+
+  private handleMouse(e: MouseEvent, r: Rect): void {
+    switch (e.action) {
+      case 'wheelup':
+        this.pane.scroll(-3);
+        break;
+      case 'wheeldown':
+        this.pane.scroll(3);
+        break;
+      case 'down':
+        this.clearSelection();
+        if (e.button === 0 && this.hasOutput) this.startSelection(e, r);
+        break;
+      case 'drag':
+        this.extendSelection(e, r);
+        break;
+      case 'up':
+        this.endSelection();
+        break;
+    }
+  }
+
+  get hasSelection(): boolean {
+    return this.sel !== null;
+  }
+
+  clearSelection(): void {
+    this.sel?.ref.dispose();
+    this.sel = null;
+  }
+
+  /** Absolute buffer line and column under a mouse position, clamped to the pane. */
+  private cellAt(e: MouseEvent, r: Rect): { abs: number; col: number } {
+    const term = this.pane.term;
+    const row = Math.max(0, Math.min(r.h - 1, term.rows - 1, e.y - r.y));
+    const col = Math.max(0, Math.min(r.w - 1, term.cols - 1, e.x - r.x));
+    return { abs: term.buffer.active.viewportY + row, col };
+  }
+
+  private startSelection(e: MouseEvent, r: Rect): void {
+    const ref = this.pane.term.registerMarker(0);
+    if (!ref) return;
+    const { abs, col } = this.cellAt(e, r);
+    const pos = { line: abs - ref.line, col };
+    this.sel = { ref, a: pos, b: { ...pos }, dragging: true, moved: false };
+  }
+
+  private extendSelection(e: MouseEvent, r: Rect): void {
+    const sel = this.sel;
+    if (!sel?.dragging) return;
+    // Dragging past the top or bottom edge scrolls.
+    if (e.y < r.y) this.pane.scroll(-1);
+    else if (e.y >= r.y + r.h) this.pane.scroll(1);
+    const { abs, col } = this.cellAt(e, r);
+    sel.b = { line: abs - sel.ref.line, col };
+    sel.moved = true;
+  }
+
+  private endSelection(): void {
+    const sel = this.sel;
+    if (!sel?.dragging) return;
+    sel.dragging = false;
+    const text = this.selectedText();
+    if (!sel.moved || !text) {
+      this.clearSelection();
+      return;
+    }
+    this.onCopy?.(text);
+  }
+
+  /** Selection start and end as absolute buffer positions, in reading order. */
+  private range(): [SelPos, SelPos] | null {
+    const sel = this.sel;
+    if (!sel) return null;
+    if (sel.ref.isDisposed) {
+      this.sel = null; // the anchored text was trimmed from the scrollback
+      return null;
+    }
+    const a = { line: sel.ref.line + sel.a.line, col: sel.a.col };
+    const b = { line: sel.ref.line + sel.b.line, col: sel.b.col };
+    return a.line < b.line || (a.line === b.line && a.col <= b.col) ? [a, b] : [b, a];
+  }
+
+  selectedText(): string {
+    const range = this.range();
+    if (!range) return '';
+    const [s, e] = range;
+    const buf = this.pane.term.buffer.active;
+    let out = '';
+    for (let y = s.line; y <= e.line; y++) {
+      const line = buf.getLine(y);
+      if (!line) continue;
+      if (y > s.line && !line.isWrapped) out += '\n';
+      out += line.translateToString(
+        true,
+        y === s.line ? s.col : 0,
+        y === e.line ? e.col + 1 : undefined,
+      );
+    }
+    return out;
+  }
+
+  private paintSelection(ctx: Ctx, r: Rect): void {
+    const range = this.range();
+    if (!range) return;
+    const [s, e] = range;
+    const top = this.pane.term.buffer.active.viewportY;
+    const w = Math.min(r.w, this.pane.term.cols);
+    for (let row = 0; row < r.h; row++) {
+      const y = top + row;
+      if (y < s.line || y > e.line) continue;
+      const c0 = y === s.line ? s.col : 0;
+      const c1 = y === e.line ? e.col : w - 1;
+      ctx.screen.paint(
+        { x: r.x + c0, y: r.y + row, w: c1 - c0 + 1, h: 1 },
+        { bg: ctx.theme.selBg },
+      );
+    }
   }
 
   handleKey(e: KeyEvent): boolean {
     const rows = this.pane.term.rows;
     switch (e.name) {
+      case 'escape':
+        if (!this.sel) return false;
+        this.clearSelection();
+        return true;
       case 'up':
       case 'k':
         this.pane.scroll(-1);
