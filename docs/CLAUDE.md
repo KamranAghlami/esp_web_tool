@@ -13,7 +13,7 @@ Browser-based TUI (feels like a CLI running through ttyd) for flashing Espressif
 - `src/monitor/` — headless-xterm `TermPane` (blitted into the monitor pane), demo stream
 - `src/serial/` — `PortManager`, the single owner of the `SerialPort`
 - `src/flash/` — the flash plan: manifest parser + adapters, Manifest-field targets, GitHub releases, `FlashPlan` (rows, red rows, locks). No DOM: it talks to the browser through `FileHost`
-- `src/browser/` — DOM-side implementations (`files.ts`: pickers, folder access, fetch)
+- `src/browser/` — DOM-side implementations (`files.ts`: pickers, folder access, fetch, kept handles; `plan-store.ts`: IndexedDB)
 - `src/app/settings.ts` — what is remembered in `localStorage`: last used, per USB device, layout
 
 The app never touches the DOM except in `src/main.ts` and `src/browser/`. Gesture-gated browser calls (`requestPort`, file and folder pickers) must run synchronously from input dispatch.
@@ -25,7 +25,8 @@ The app never touches the DOM except in `src/main.ts` and `src/browser/`. Gestur
 - Menus are pop-ups centered on the pane they belong to. Submenus have a `‹ Back` row, and Esc/Backspace go back (not ←).
 - Every keyboard action also works with the mouse, and every view is tested at desktop size (phones later, §4.1).
 - The app draws on the alternate screen (`?1049h`); without it, resizes leave stale lines.
-- Settings are remembered: as last used, per USB vid:pid (manifest + monitor), and per browser for layout (pane, fullscreen).
+- Settings are remembered: as last used, per USB vid:pid (manifest + monitor), and per browser for layout (pane, fullscreen). The flash plan (rows, picked file handles) is kept the same way in IndexedDB (`src/browser/plan-store.ts`).
+- Dialogs (e.g. the part dialog) are centered on their pane: Tab moves, Enter saves, Esc cancels.
 
 ## Commands
 

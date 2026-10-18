@@ -1,5 +1,5 @@
 import { FetchError, type FileHost } from './host';
-import { MANIFEST_NAMES } from './manifest';
+import { MANIFEST_NAME } from './manifest';
 
 /** A release as listed by the GitHub API (only the fields we use). */
 export interface Release {
@@ -44,13 +44,9 @@ export function defaultRelease(releases: Release[], tag: string | null): number 
   return full >= 0 ? full : releases.length ? 0 : -1;
 }
 
-/** The release's manifest asset, by name in MANIFEST_NAMES order. */
+/** The release's manifest asset (`esp-web-tool.json`). */
 export function manifestAsset(release: Release): Release['assets'][number] | null {
-  for (const name of MANIFEST_NAMES) {
-    const a = release.assets.find((x) => x.name === name);
-    if (a) return a;
-  }
-  return null;
+  return release.assets.find((x) => x.name === MANIFEST_NAME) ?? null;
 }
 
 /**

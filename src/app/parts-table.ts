@@ -1,10 +1,10 @@
 import type { FlashPlan, PlanRow } from '../flash/plan';
-import { formatOffset, parseOffset } from '../flash/offsets';
+import { formatOffset } from '../flash/offsets';
 import type { KeyEvent } from '../tty/input';
 import type { Ctx } from '../tui/context';
 import type { Rect } from '../tui/screen';
 import { Attr, type Style } from '../tui/style';
-import { type Focusable, spinner, TextInput } from '../tui/widgets';
+import { type Focusable, spinner } from '../tui/widgets';
 import { padEnd, stringWidth, truncate } from '../tui/width';
 import { formatSize } from './format';
 
@@ -12,21 +12,18 @@ type Notify = (text: string, kind: 'info' | 'warn' | 'error') => void;
 
 /**
  * The editable parts table (SPEC §5.2). Rows are always editable by key or mouse, except
- * those the manifest locks: `a` add, `d` delete, `e`/Enter offset, `r` replace file,
- * `Space` toggle, `o` grant the manifest's folder. The last row is `+ add file`.
+ * those the manifest locks: `a` add, `e`/Enter edit (offset and file, in a dialog), `d`
+ * delete, `Space` toggle, `o` grant access to local files. The last row is `+ add part`.
  */
 export class PartsTable implements Focusable {
   selected = 0;
   private scroll = 0;
   private lastHeight = 1;
-  private editing: { row: PlanRow; input: TextInput } | null = null;
   onNotify?: Notify;
+  /** Open the part dialog for `row`, or for a new part when null. */
+  onEdit?: (row: PlanRow | null) => void;
 
   constructor(private plan: FlashPlan) {}
-
-  get capturesText(): boolean {
-    return this.editing !== null;
-  }
 
   private get rows(): PlanRow[] {
     return this.plan.rows;
@@ -46,7 +43,11 @@ export class PartsTable implements Focusable {
   // Actions (pickers run synchronously, inside the key press or click)
 
   add(): void {
-    this.plan.addFiles();
+    this.onEdit?.(null);
+  }
+
+  edit(row: PlanRow): void {
+    if (!this.locked(row)) this.onEdit?.(row);
   }
 
   remove(row: PlanRow): void {
@@ -55,28 +56,8 @@ export class PartsTable implements Focusable {
     this.selected = Math.min(this.selected, this.rows.length);
   }
 
-  replace(row: PlanRow): void {
-    if (!this.locked(row)) this.plan.replaceFile(row);
-  }
-
   toggle(row: PlanRow): void {
     if (!this.locked(row)) this.plan.toggle(row);
-  }
-
-  editOffset(row: PlanRow): void {
-    if (this.locked(row)) return;
-    this.editing = { row, input: new TextInput(formatOffset(row.offset)) };
-  }
-
-  private commitOffset(): void {
-    const { row, input } = this.editing!;
-    const offset = parseOffset(input.value);
-    if (offset === null) {
-      this.onNotify?.(`Not a hex offset: ${input.value}`, 'error');
-      return;
-    }
-    this.plan.setOffset(row, offset);
-    this.editing = null;
   }
 
   // ---------------------------------------------------------------------------
@@ -85,11 +66,15 @@ export class PartsTable implements Focusable {
   render(ctx: Ctx, r: Rect, focused: boolean): void {
     const { screen, theme } = ctx;
     let body = r;
-    if (this.plan.needsFolder) {
-      const msg = '! Parts sit next to the manifest: o (or click) to grant its folder';
+    const access = this.plan.access;
+    if (access) {
+      const msg =
+        access === 'folder'
+          ? '! Parts sit next to the manifest: o (or click) to grant its folder'
+          : '! Local files need your permission again: o (or click) to allow';
       screen.text(r.x, r.y, truncate(msg, r.w), { fg: theme.warn });
       ctx.hits.add({ x: r.x, y: r.y, w: r.w, h: 1 }, (e) => {
-        if (e.action === 'down') this.plan.grantFolder();
+        if (e.action === 'down') this.plan.grantAccess();
       });
       body = { ...r, y: r.y + 1, h: r.h - 1 };
     }
@@ -112,7 +97,7 @@ export class PartsTable implements Focusable {
       else this.drawAddLine(ctx, { x: body.x, y, w: body.w, h: 1 }, sel, bg);
     }
     if (this.rows.length === 0 && body.h > 3) {
-      const hint = 'No parts yet: load a manifest above, or add files (a)';
+      const hint = 'No parts yet: load a manifest above, or add parts (a)';
       screen.text(body.x + 2, body.y + 2, truncate(hint, body.w - 2), { fg: theme.dim });
     }
     ctx.hits.add(
@@ -129,7 +114,7 @@ export class PartsTable implements Focusable {
     );
   }
 
-  /** `▶[x] 0x010000  my-fw.bin ……… 1.2 MiB ✕`, with click zones per column. */
+  /** `▶ [x] 0x010000  my-fw.bin ……… 1.2 MiB ✕`, with click zones per column. */
   private drawRow(
     ctx: Ctx,
     row: PlanRow,
@@ -151,18 +136,14 @@ export class PartsTable implements Focusable {
     const rightW = Math.min(Math.max(10, stringWidth(right)), Math.floor(r.w / 2));
     let x = r.x;
     screen.text(x, r.y, sel ? '▶' : ' ', base);
-    x++;
+    x += 2;
     const box = row.enabled ? '[x]' : '[ ]';
     screen.text(x, r.y, box, row.locked ? dim : base);
     const boxX = x;
     x += 4;
     const offX = x;
-    if (this.editing?.row === row) {
-      this.editing.input.render(ctx, { x: x - 1, y: r.y, w: 11, h: 1 }, true);
-    } else {
-      x = screen.text(x, r.y, formatOffset(row.offset), row.locked ? dim : base);
-      if (row.offsetGuessed) screen.text(x, r.y, '?', { fg: theme.warn, bg, attrs: Attr.Bold });
-    }
+    x = screen.text(x, r.y, formatOffset(row.offset), row.locked ? dim : base);
+    if (row.offsetGuessed) screen.text(x, r.y, '?', { fg: theme.warn, bg, attrs: Attr.Bold });
     x = offX + 10;
     const nameW = Math.max(4, r.x + r.w - x - rightW - 1 - stringWidth(del));
     const tag = row.locked ? ' (locked)' : '';
@@ -184,16 +165,15 @@ export class PartsTable implements Focusable {
         this,
       );
     at(boxX, 3, () => this.toggle(row));
-    at(offX, 9, () => this.editOffset(row));
-    // A click on the selected row's name replaces its file; on another row it just selects.
-    at(x, nameW, () => sel && this.replace(row));
+    // A click on the selected row's offset or name edits it; on another row it just selects.
+    at(offX, nameW + 10, () => sel && this.edit(row));
     if (del) at(r.x + r.w - 2, 2, () => this.remove(row));
   }
 
   private drawAddLine(ctx: Ctx, r: Rect, sel: boolean, bg: number | undefined): void {
     const { screen, theme } = ctx;
     screen.text(r.x, r.y, sel ? '▶' : ' ', { fg: theme.fg, bg });
-    screen.text(r.x + 1, r.y, '+ add file', { fg: sel ? theme.accent : theme.dim, bg });
+    screen.text(r.x + 2, r.y, '+ add part', { fg: sel ? theme.accent : theme.dim, bg });
     ctx.hits.add({ x: r.x, y: r.y, w: 12, h: 1 }, (e) => e.action === 'down' && this.add(), this);
   }
 
@@ -201,12 +181,6 @@ export class PartsTable implements Focusable {
   // Keys
 
   handleKey(e: KeyEvent): boolean {
-    if (this.editing) {
-      if (e.name === 'escape') this.editing = null;
-      else if (e.name === 'enter') this.commitOffset();
-      else this.editing.input.handleKey(e);
-      return true;
-    }
     const count = this.rows.length + 1;
     const page = Math.max(1, this.lastHeight - 1);
     const row = this.current;
@@ -237,10 +211,10 @@ export class PartsTable implements Focusable {
         this.add();
         return true;
       case 'o':
-        this.plan.grantFolder();
+        this.plan.grantAccess();
         return true;
       case 'enter':
-        if (row) this.editOffset(row);
+        if (row) this.edit(row);
         else this.add();
         return true;
     }
@@ -250,10 +224,7 @@ export class PartsTable implements Focusable {
         this.toggle(row);
         return true;
       case 'e':
-        this.editOffset(row);
-        return true;
-      case 'r':
-        this.replace(row);
+        this.edit(row);
         return true;
       case 'd':
       case 'delete':
@@ -261,9 +232,5 @@ export class PartsTable implements Focusable {
         return true;
     }
     return false;
-  }
-
-  handlePaste(text: string): void {
-    this.editing?.input.handlePaste(text);
   }
 }

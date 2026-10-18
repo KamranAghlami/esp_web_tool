@@ -1,4 +1,10 @@
-import { FetchError, type FileHost, type LocalFile, type LocalFolder } from '../flash/host';
+import {
+  AccessError,
+  FetchError,
+  type FileHost,
+  type LocalFile,
+  type LocalFolder,
+} from '../flash/host';
 
 /** The File System Access API pickers (Chromium); not in TypeScript's DOM types yet. */
 interface PickerWindow {
@@ -12,13 +18,36 @@ interface PickerWindow {
   }): Promise<FileSystemDirectoryHandle>;
 }
 
+/** Permission methods of kept handles (Chromium); not in TypeScript's DOM types yet. */
+interface PermissionHandle {
+  queryPermission?(opts: { mode: 'read' }): Promise<PermissionState>;
+  requestPermission?(opts: { mode: 'read' }): Promise<PermissionState>;
+}
+
 const win = window as unknown as PickerWindow;
+
+/** After a reload, kept handles throw NotAllowedError until the user allows them again. */
+async function guarded<T>(read: () => Promise<T>): Promise<T> {
+  try {
+    return await read();
+  } catch (err) {
+    if (
+      err instanceof DOMException &&
+      (err.name === 'NotAllowedError' || err.name === 'SecurityError')
+    )
+      throw new AccessError('needs permission again');
+    throw err;
+  }
+}
 
 const fromHandle = (handle: FileSystemFileHandle): LocalFile => ({
   name: handle.name,
   handle,
-  read: async () => new Uint8Array(await (await handle.getFile()).arrayBuffer()),
+  read: () => guarded(async () => new Uint8Array(await (await handle.getFile()).arrayBuffer())),
 });
+
+const isHandle = (h: unknown, kind: FileSystemHandleKind): boolean =>
+  typeof FileSystemHandle !== 'undefined' && h instanceof FileSystemHandle && h.kind === kind;
 
 const fromFile = (file: File): LocalFile => ({
   name: file.name,
@@ -43,14 +72,17 @@ const isAbort = (err: unknown) => err instanceof DOMException && err.name === 'A
 function folderOf(dir: FileSystemDirectoryHandle): LocalFolder {
   return {
     name: dir.name,
+    handle: dir,
     async read(path) {
       const segments = path.split('/').filter((s) => s && s !== '.');
       if (segments.includes('..')) throw new FetchError('paths outside the folder are not allowed');
       try {
-        let d = dir;
-        for (const s of segments.slice(0, -1)) d = await d.getDirectoryHandle(s);
-        const file = await (await d.getFileHandle(segments.at(-1) ?? '')).getFile();
-        return new Uint8Array(await file.arrayBuffer());
+        return await guarded(async () => {
+          let d = dir;
+          for (const s of segments.slice(0, -1)) d = await d.getDirectoryHandle(s);
+          const file = await (await d.getFileHandle(segments.at(-1) ?? '')).getFile();
+          return new Uint8Array(await file.arrayBuffer());
+        });
       } catch (err) {
         if (err instanceof DOMException && err.name === 'NotFoundError')
           throw new FetchError(`not found in ${dir.name}/`);
@@ -66,7 +98,7 @@ async function get(url: string, accept?: string): Promise<Response> {
     res = await fetch(url, accept ? { headers: { Accept: accept } } : undefined);
   } catch {
     // fetch() only says "Failed to fetch": no CORS header, offline or a bad host.
-    throw new FetchError('blocked (no CORS) or unreachable');
+    throw new FetchError('unreachable or no CORS');
   }
   if (res.ok) return res;
   if (
@@ -114,5 +146,20 @@ export const browserFiles: FileHost = {
 
   async fetchJson(url) {
     return (await get(url, 'application/vnd.github+json')).json();
+  },
+
+  restoreFile(handle) {
+    return isHandle(handle, 'file') ? fromHandle(handle as FileSystemFileHandle) : null;
+  },
+
+  restoreFolder(handle) {
+    return isHandle(handle, 'directory') ? folderOf(handle as FileSystemDirectoryHandle) : null;
+  },
+
+  async requestAccess(handles) {
+    // All requested inside the same gesture; Chrome asks once per handle not yet allowed.
+    await Promise.all(
+      handles.map((h) => (h as PermissionHandle).requestPermission?.({ mode: 'read' })),
+    );
   },
 };

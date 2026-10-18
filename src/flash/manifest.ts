@@ -31,8 +31,11 @@ export interface PlanPart {
   locked: boolean;
 }
 
-/** The manifest names tried, in order, when a folder (or folder URL) is given. */
-export const MANIFEST_NAMES = ['esp-web-tool.json', 'manifest.json', 'flasher_args.json'];
+/**
+ * The manifest looked for when no file is named: in a folder URL and in a GitHub release.
+ * Other formats are read only when their URL (or file) is given directly.
+ */
+export const MANIFEST_NAME = 'esp-web-tool.json';
 
 export class ManifestError extends Error {}
 

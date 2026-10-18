@@ -26,8 +26,9 @@ import {
   spinner,
 } from '../tui/widgets';
 import { stringWidth } from '../tui/width';
-import { BAUD_RATES, FlashPane, formatSize } from './flash-pane';
+import { BAUD_RATES, FlashPane, formatSize, isSavedFlash } from './flash-pane';
 import { HELP } from './help';
+import { PartEditor } from './part-editor';
 import { LINE_ENDINGS, MonitorPane } from './monitor-pane';
 import type { FileHost } from '../flash/host';
 import {
@@ -36,6 +37,7 @@ import {
   rememberDevice,
   type Settings,
   SettingsStore,
+  type ValueStore,
 } from './settings';
 
 export const MIN_COLS = 80;
@@ -59,7 +61,8 @@ type Message = { text: string; kind: MessageKind; until: number };
 type Overlay =
   | { kind: 'help'; scroll: number }
   | { kind: 'confirm'; title: string; body: string[]; onYes: () => void }
-  | { kind: 'menu'; menu: Menu };
+  | { kind: 'menu'; menu: Menu }
+  | { kind: 'part'; editor: PartEditor };
 export type DemoMode = 'off' | 'normal' | 'flood';
 
 /** How a gesture-gated browser call was triggered, for the M0 spike (SPEC §3.1). */
@@ -82,6 +85,8 @@ export interface AppOptions {
   copy?: (text: string) => Promise<void>;
   /** Where settings are remembered (localStorage in the page); none means nothing sticks. */
   storage?: KeyValueStore;
+  /** Where the flash plan (with file handles) is kept per device: IndexedDB in the page. */
+  plans?: ValueStore;
   /** File pickers, folder access and fetch for the flash plan (`src/browser/files.ts`). */
   files: FileHost;
   /** Asset proxy base URL for GitHub release files (SPEC §7.4); none until it exists. */
@@ -130,6 +135,10 @@ export class App {
   private startDemo: DemoMode;
   private store: SettingsStore;
   private settings: Settings;
+  private plans?: ValueStore;
+  /** Plans are saved only once the remembered one was restored (or there was none). */
+  private planReady = false;
+  private planTimer: ReturnType<typeof setTimeout> | null = null;
 
   private demo: DemoMode = 'off';
   private demoTimer: ReturnType<typeof setInterval> | null = null;
@@ -149,8 +158,28 @@ export class App {
     this.schedule = opts.schedule ?? ((fn) => requestAnimationFrame(fn));
     this.openUrl = opts.openUrl ?? (() => {});
     this.copy = opts.copy ?? (() => Promise.resolve());
-    this.flash = new FlashPane(opts.files, this.invalidate, opts.assetProxy);
+    this.plans = opts.plans;
+    this.flash = new FlashPane(
+      opts.files,
+      () => {
+        this.invalidate();
+        this.queuePlanSave();
+      },
+      opts.assetProxy,
+    );
     this.flash.parts.onNotify = (text, kind) => this.notify(text, kind);
+    this.flash.parts.onEdit = (row) => {
+      const editor = new PartEditor(
+        this.flash.plan,
+        row,
+        () => {
+          if (this.overlay?.kind === 'part' && this.overlay.editor === editor) this.overlay = null;
+          this.invalidate();
+        },
+        (text) => this.notify(text, 'warn'),
+      );
+      this.overlay = { kind: 'part', editor };
+    };
     // After Enter in the Manifest field, the table is where the next keys belong.
     this.flash.onSubmitted = () => this.focusWidget(this.flash.parts);
     this.flash.release.onOpen = () => {
@@ -205,7 +234,12 @@ export class App {
     this.applySettings(this.settings.last);
     this.pane = this.settings.ui.pane;
     this.zoomed = this.settings.ui.fullscreen;
-    if (opts.manifest) this.useManifest(opts.manifest);
+    if (opts.manifest) {
+      this.useManifest(opts.manifest);
+      this.planReady = true;
+    } else {
+      void this.restorePlan('last', this.settings.last.flash.manifest);
+    }
 
     this.tty.onData((d) => this.onData(d));
     this.tty.onResize(() => {
@@ -262,10 +296,9 @@ export class App {
   // -------------------------------------------------------------------------
   // Settings
 
-  /** Puts a remembered snapshot into the widgets and the port manager. */
+  /** Puts a remembered snapshot into the widgets and the port manager (the plan: restorePlan). */
   private applySettings({ flash, monitor }: DeviceSettings): void {
     const f = this.flash;
-    if (flash.manifest !== f.manifest.value) this.useManifest(flash.manifest);
     f.baud.index = Math.max(0, BAUD_RATES.indexOf(flash.baud as (typeof BAUD_RATES)[number]));
     f.eraseAll.checked = flash.eraseAll;
     f.verify.checked = flash.verify;
@@ -274,6 +307,45 @@ export class App {
     this.ports.format = monitor.format;
     this.monitor.eol = monitor.eol;
     if (this.monitor.colorize !== monitor.colorize) this.monitor.toggleColorize();
+  }
+
+  /**
+   * Brings back the flash plan kept for `key` ("last" or a vid:pid): the manifest, the rows as
+   * edited, picked files. Without one, falls back to loading the remembered Manifest field.
+   */
+  private async restorePlan(key: string, fallback: string): Promise<void> {
+    let saved: unknown;
+    try {
+      saved = await this.plans?.get(key);
+    } catch {
+      saved = undefined;
+    }
+    if (isSavedFlash(saved)) {
+      this.flash.restore(saved);
+      // localStorage is written at once; IndexedDB can lose an edit made just before a reload.
+      if (fallback && fallback !== saved.field) this.flash.manifest.setValue(fallback);
+    } else if (fallback !== this.flash.manifest.value) this.useManifest(fallback);
+    this.planReady = true;
+    this.invalidate();
+  }
+
+  /** Plans also change from async reads; those changes are saved shortly after. */
+  private queuePlanSave(): void {
+    if (!this.plans || !this.planReady || this.planTimer) return;
+    this.planTimer = setTimeout(() => this.savePlan(), 300);
+  }
+
+  /** Saves the plan as the last used, and for the connected device. */
+  private savePlan(): void {
+    if (this.planTimer) clearTimeout(this.planTimer);
+    this.planTimer = null;
+    if (!this.plans || !this.planReady) return;
+    const saved = this.flash.save();
+    // A put can fail (a handle the browser can't store, quota): that plan just isn't kept.
+    const put = (key: string) => void this.plans!.put(key, saved).catch(() => {});
+    put('last');
+    const key = this.ports.port && portKey(this.ports.port);
+    if (key && this.ports.state === 'open') put(key);
   }
 
   /** Put `text` in the Manifest field and load it (empty clears the field only). */
@@ -310,21 +382,25 @@ export class App {
     const key = this.ports.port && portKey(this.ports.port);
     if (key && this.ports.state === 'open') rememberDevice(s.devices, key, s.last);
     this.store.save(s);
+    // Input saves at once, so a reload right after an edit keeps it.
+    this.savePlan();
   }
 
   private dispatch(e: InputEvent): void {
     if (e.type === 'mouse') {
       this.lastTrigger = 'mouse';
       // A click on a widget focuses it, even if the click also opened an overlay (a menu).
-      const covered = this.overlay !== null;
+      const covered = this.overlay;
       const { owner } = this.hits.dispatch(e);
       if (e.action === 'down' && owner && !covered) this.focusWidget(owner);
+      if (e.action === 'down' && covered?.kind === 'part') covered.editor.clicked(owner);
       return;
     }
     this.lastTrigger = 'key';
 
     if (this.overlay) {
       if (e.type === 'key') this.overlayKey(e);
+      else if (this.overlay.kind === 'part') this.overlay.editor.handlePaste(e.text);
       return;
     }
 
@@ -397,6 +473,10 @@ export class App {
     const o = this.overlay!;
     if (o.kind === 'menu') {
       o.menu.handleKey(e);
+      return;
+    }
+    if (o.kind === 'part') {
+      o.editor.handleKey(e);
       return;
     }
     if (o.kind === 'help') {
@@ -684,7 +764,10 @@ export class App {
         // A device seen before gets back everything it had last time (flash and monitor).
         const key = portKey(port);
         const known = key ? this.settings.devices[key] : undefined;
-        if (known) this.applySettings(known);
+        if (known) {
+          this.applySettings(known);
+          void this.restorePlan(key!, known.flash.manifest);
+        }
         return ports.open(port).then(() => {
           this.setDemo('off');
           this.monitor.clear();
@@ -973,6 +1056,14 @@ export class App {
         { key: 'Esc', label: menu.isSubmenu ? 'Back' : 'Close', action: () => menu.back() },
       ];
     }
+    if (this.overlay?.kind === 'part') {
+      const editor = this.overlay.editor;
+      return [
+        { key: 'Tab', label: 'Next field' },
+        { key: '⏎', label: editor.row ? 'Save' : 'Add', action: () => editor.save() },
+        { key: 'Esc', label: 'Cancel', action: () => (this.overlay = null) },
+      ];
+    }
     if (this.monitor.live) {
       return [
         { key: 'LIVE', label: 'keys go to the device' },
@@ -984,12 +1075,11 @@ export class App {
     const parts = this.flash.parts;
     // The parts table's own keys go in the middle, in place of the focus/pane hints.
     const local: KeyHint[] =
-      this.pane === 'flash' && this.focused() === parts && !parts.capturesText
+      this.pane === 'flash' && this.focused() === parts
         ? [
             { key: 'a', label: 'Add', action: () => parts.add() },
+            { key: 'e', label: 'Edit' },
             { key: 'd', label: 'Delete' },
-            { key: 'e', label: 'Offset' },
-            { key: 'r', label: 'Replace' },
             { key: 'Space', label: 'On/off' },
           ]
         : [
@@ -1031,6 +1121,10 @@ export class App {
       o.menu.render(ctx);
       return;
     }
+    if (o.kind === 'part') {
+      o.editor.render(ctx, this.rects.flash ?? this.rects.main!);
+      return;
+    }
     if (o.kind === 'confirm') {
       const w = Math.max(...o.body.map(stringWidth), stringWidth(o.title)) + 6;
       const inner = dialog(ctx, o.title, w, o.body.length + 4, theme.warn);
@@ -1040,8 +1134,15 @@ export class App {
       return;
     }
     const lines = HELP;
+    const keyW = Math.max(...lines.filter(([, d]) => d).map(([k]) => stringWidth(k))) + 2;
+    const descW = Math.max(...lines.map(([, d]) => stringWidth(d ?? '')));
     const h = Math.min(lines.length + 4, screen.rows - 4);
-    const inner = dialog(ctx, 'Help · Esc to close', 70, h);
+    const inner = dialog(
+      ctx,
+      'Help · Esc to close',
+      Math.min(screen.cols - 4, keyW + descW + 6),
+      h,
+    );
     // Wheel scrolls anywhere; a click outside the dialog closes it.
     const outer = { x: inner.x - 1, y: inner.y - 1, w: inner.w + 2, h: inner.h + 2 };
     ctx.hits.add({ x: 0, y: 0, w: screen.cols, h: screen.rows }, (e) => {
@@ -1058,7 +1159,7 @@ export class App {
         return;
       }
       screen.text(body.x + 2, y, k, { fg: theme.keyFg, bg: theme.inputBg, attrs: Attr.Bold });
-      screen.text(body.x + 22, y, d, { fg: theme.fg, bg: theme.inputBg }, body.w - 24);
+      screen.text(body.x + 2 + keyW, y, d, { fg: theme.fg, bg: theme.inputBg }, body.w - keyW - 3);
     });
   }
 }

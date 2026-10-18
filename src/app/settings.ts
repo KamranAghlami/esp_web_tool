@@ -6,7 +6,7 @@ import { LINE_ENDINGS } from './monitor-pane';
  * Settings remembered by this browser (SPEC §10), in localStorage. `last` is what was used
  * most recently and what the page starts with. Each USB device (vid:pid) also gets a full copy,
  * restored when that device is connected again, so every board keeps its own manifest and
- * monitor setup. Picked files are not remembered: the browser drops access to them.
+ * monitor setup. The flash plan itself (rows, picked files) is kept in a ValueStore.
  */
 export interface Settings {
   last: DeviceSettings;
@@ -47,6 +47,15 @@ export interface MonitorSettings {
 export interface KeyValueStore {
   getItem(key: string): string | null;
   setItem(key: string, value: string): void;
+}
+
+/**
+ * Async store for structured-clonable values: IndexedDB in the page. Keeps the flash plan
+ * per device ("last" and vid:pid), file and folder handles included, which localStorage can't.
+ */
+export interface ValueStore {
+  get(key: string): Promise<unknown>;
+  put(key: string, value: unknown): Promise<void>;
 }
 
 export const STORAGE_KEY = 'esp-web-tool:settings:v2';

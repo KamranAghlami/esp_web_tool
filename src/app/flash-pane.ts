@@ -1,5 +1,5 @@
 import type { FileHost } from '../flash/host';
-import { FlashPlan } from '../flash/plan';
+import { FlashPlan, type SavedPlan } from '../flash/plan';
 import type { Ctx } from '../tui/context';
 import { rows } from '../tui/layout';
 import type { Rect } from '../tui/screen';
@@ -21,6 +21,17 @@ export { formatSize } from './format';
 
 export const BAUD_RATES = [115200, 230400, 460800, 921600, 1500000, 2000000] as const;
 
+/** What is kept per device across reloads (IndexedDB, SPEC §10). */
+export interface SavedFlash {
+  v: 1;
+  /** The Manifest field's text. */
+  field: string;
+  plan: SavedPlan;
+}
+
+export const isSavedFlash = (v: unknown): v is SavedFlash =>
+  typeof v === 'object' && v !== null && (v as SavedFlash).v === 1;
+
 interface SimRun {
   start: number;
   /** Bytes per millisecond. */
@@ -34,7 +45,7 @@ interface SimRun {
  */
 export class FlashPane {
   readonly plan: FlashPlan;
-  readonly manifest = new TextInput('', 'URL, folder URL or owner/repo · Enter when empty: a file');
+  readonly manifest = new TextInput('', 'URL or owner/repo · Enter: a file');
   /** Indices into plan.releases / plan.manifest.sets. */
   readonly release: Select<number>;
   readonly set: Select<number>;
@@ -71,6 +82,15 @@ export class FlashPane {
       const i = BAUD_RATES.indexOf(set.baudrate as (typeof BAUD_RATES)[number]);
       if (i >= 0) this.baud.index = i;
     };
+  }
+
+  save(): SavedFlash {
+    return { v: 1, field: this.manifest.value, plan: this.plan.save() };
+  }
+
+  restore(saved: SavedFlash): void {
+    this.manifest.setValue(saved.field);
+    this.plan.restore(saved.plan);
   }
 
   /** Focus order; the pickers only exist when there is something to pick. */

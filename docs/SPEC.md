@@ -146,7 +146,7 @@ interface FlashPlan {
 │ │ [x] 0x008000  partition-table.bin  3.0 KiB │  │                                              │
 │ │ [x] 0x010000  my-fw.bin            1.2 MiB │  │                                              │
 │ │ [x] 0x110000  storage.bin   not found (404)│  │  ← red: blocks F                             │
-│ │ + add file                                 │  │                                              │
+│ │ + add part                                 │  │                                              │
 │ └────────────────────────────────────────────┘  │                                              │
 │ Baud [921600▾] Erase all [ ] Verify [x] Reset after [x]                                       │
 │ my-fw.bin   ███████████████▌               52%  612 KiB/s                                     │
@@ -201,7 +201,7 @@ A browser tab is a hostile terminal. Chrome **does not let pages intercept** `Ct
 | `F` | Start flash (confirm dialog with the plan summary) |
 | `E` | Erase entire flash (confirm) |
 | `Enter` in the Manifest field | Load what it holds (URL, folder URL, GitHub repo); on an empty field, open the file picker |
-| `a` / `d` / `e` / `r` / `o` | Parts table: add files / delete row / edit offset (also `Enter`) / replace the row's file / grant the manifest's folder. `Space` toggles a row |
+| `a` / `e` / `d` / `o` | Parts table: add a part / edit the row's offset and file in the part dialog (also `Enter`) / delete row / allow reading local files (the manifest's folder, or again after a reload). `Space` toggles a row |
 | `Enter` on the Monitor pane | Enter the monitor: **from here every key goes to the device** |
 | `Ctrl+]` | Leave the monitor (back to hotkeys) |
 | `Ctrl+A` | Monitor menu: a centered pop-up that lists its keys and is clickable (live, or with the Monitor pane focused). `r` reset, `b` boot mode, `C` clear, `s` settings ▸ (`b` baud ▸, `f` format 8N1/8E1/7E1… ▸, `e` line ending ▸), `h` log-level colors, `f` fullscreen, `Ctrl+A` send a literal `Ctrl+A`, `?` help; later: `d` DTR, `t` timestamps, `l` save log. Menus open centered on the pane they belong to. Submenus have a `‹ Back` row; Esc and Backspace go back. Current values show in the menu labels and the status line (`303a:1001 @ 115200 8N1`), not in the pane header. |
@@ -240,27 +240,28 @@ There is no source switch (the M0 `Files / GitHub / URL` radio is gone). One edi
 **What the field accepts**:
 - **A local manifest file**: the `Open…` button next to the field, or `Enter` on an empty field, opens the file picker. The file is read when the dialog closes. The field then shows the file's name.
 - **A URL ending in `.json`**: fetched as the manifest.
-- **A URL to a folder** (not ending in `.json`): the tool tries `<url>/esp-web-tool.json`, then `manifest.json`, then `flasher_args.json`. The same applies when a picked file's address is edited into a folder URL.
+- **A URL to a folder** (not ending in `.json`): the tool reads `<url>/esp-web-tool.json`, and only that name (decided 2026-10-18). The other formats (§6.1) are read only when their URL or file is given directly. The same applies when a picked file's address is edited into a folder URL.
 - **A GitHub repo** (`owner/repo`, `https://github.com/owner/repo`, `…/releases/tag/<tag>`, `…/releases/latest`): its releases are listed and the latest is preselected (no drafts or pre-releases), with a `Release ▾` picker. The manifest is read from the release (§7).
 - **Empty**: a hand-made plan, only the rows you add.
 
 Text is read on `Enter`, files when the picker closes. A manifest with several sets shows a `Set ▾` picker (later preselected by the detected chip). Flash baud and Erase all come from the set when it gives them.
 
-**Where the bins come from**: `path` is relative to the manifest.
-- **Manifest from a URL**: `new URL(path, manifestUrl)`.
-- **Manifest from a local file**: the browser does not give access to the file's folder. Those rows stay red ("needs folder access") until you press `o` (or click the notice). That opens a folder picker that starts in the manifest's folder (`showDirectoryPicker({ startIn: fileHandle })`), and one click grants it.
-- **Absolute `https://` paths** are fetched as they are.
+**Where the bins come from**: a part's path is relative to the manifest, or a full URL on any host.
+- **Manifest from a URL**: `new URL(path, manifestUrl)`, so relative paths, root paths (`/fw/app.bin`) and URLs on other domains all work.
+- **Manifest from a local file**: the browser does not give access to the file's folder. Those rows stay red ("needs folder access") until you press `o` (or click the notice). That opens a folder picker that starts in the manifest's folder (`showDirectoryPicker({ startIn: fileHandle })`), and one click grants it. Absolute disk paths (`/home/…`, `C:\…`) can't be read by a page: those rows are red until a file is picked for them.
+- **Full URLs** (`https://…`, `//host/…`) are fetched as they are. GitHub release URLs go through the asset proxy.
+- **No manifest**: a typed `host/path` is taken as `https://host/path`; a bare relative path is red.
 
 **Rows can always be edited**, by key or by mouse:
-- Add files with `a` or the `+ add file` row. The picker allows several files; new rows get **smart offsets** from the file name.
-- Delete a row (`d`).
-- Edit the offset with `e`, `Enter` or a click on it. The hex input takes `0x` or no `0x`.
-- Replace the row's file with `r` or a click on the name.
+- **The part dialog** (`Edit part` / `Add part`, centered on the Flash pane) holds the **Offset** (hex, with or without `0x`) and the **File**: a path relative to the manifest, a URL on any host, or a local file from `Browse…`. Tab moves between fields, `Enter` saves, `Esc` cancels. There is no separate replace key (`r` was removed, 2026-10-18).
+- `e`, `Enter`, or a click on the selected row's offset or name opens it for that row.
+- `a` or the `+ add part` row opens it empty. The File field has focus, and `Enter` on it while empty opens the file picker. Picking several files adds them all at once. An empty offset is a **smart offset** guessed from the file name.
+- Delete a row with `d` or its `✕`.
 - Toggle a row with `Space` or a click on `[x]`.
 
-The only exception is **rows the manifest locks** (§6: `"locked": true` on a part, or on a set to lock all of its parts). They can't be deleted, replaced, re-offset or disabled, and they show `locked`.
+The only exception is **rows the manifest locks** (§6: `"locked": true` on a part, or on a set to lock all of its parts). They can't be deleted, edited or disabled, and they show `locked`.
 
-**Red rows**: a row whose file can't be read is red with the reason. Reasons include 404, blocked by CORS, needs folder access, an empty file, a `sha256` mismatch, and needing the asset proxy. `F` refuses to start while any enabled row is red or still loading. Fix it by replacing the file, granting the folder, or disabling or deleting the row (if it isn't locked).
+**Red rows**: a row whose file can't be read is red with the reason. Reasons include 404, "unreachable or no CORS", needs folder access, needs permission again, an empty file, a `sha256` mismatch (the hash is dropped when the file is changed by hand), and needing the asset proxy. `F` refuses to start while any enabled row is red or still loading. Fix it in the part dialog, by granting access (`o`), or by disabling or deleting the row (if it isn't locked).
 
 **Smart offsets** for an added file, from its name:
 - `bootloader*.bin` → chip bootloader offset (ESP32/S2: `0x1000`; C2/C3/C6/H2/S3: `0x0`; C5/P4: `0x2000`). Until a chip is connected, use `0x0` and flag the row.
@@ -272,7 +273,6 @@ The only exception is **rows the manifest locks** (§6: `"locked": true` on a pa
 **Later**:
 - Drag and drop of files or folders onto the terminal.
 - Export the table as one of our manifests (§6).
-- Remember a picked manifest file across reloads (its handle can be kept in IndexedDB).
 
 ### 5.5 Validation (before the flash button is enabled)
 - **Error**: overlapping regions; a part extends past the detected flash size; an empty file; no parts enabled.
@@ -329,7 +329,7 @@ Rules:
 - `offset`: a hex string or a non-negative integer.
 - `path`: a **bare filename** means a release asset with that name in the same release (or a path relative to the manifest URL in URL mode). An **absolute `https://` URL** is fetched as is (it must be CORS-enabled).
 - `sha256` (optional): checked after download, before flashing.
-- `locked` (optional, default `false`): on a part, the user can't delete, replace, re-offset or disable it. On a set, it applies to all of that set's parts. Extra rows can still be added.
+- `locked` (optional, default `false`): on a part, the user can't delete, edit or disable it. On a set, it applies to all of that set's parts. Extra rows can still be added.
 - Unknown fields are ignored, which keeps the format forward compatible. A larger `manifestVersion` → warn and try anyway.
 
 **Adapters** (read only, converted to our model):
@@ -353,11 +353,7 @@ These forms are accepted in the Manifest field (§5.2) and in the `?manifest=` /
 - **Rate limit**: unauthenticated requests get 60/hour per IP. Cache responses in `sessionStorage` with ETag (a `304` does not count against the limit). Read `x-ratelimit-remaining`; when it reaches 0, show a reset countdown.
 
 ### 7.3 Finding the manifest in a release
-Checked in order, by asset name:
-1. `esp-web-tool.json` — our format
-2. `manifest.json` — esp-web-tools format
-3. `flasher_args.json` — ESP-IDF format
-4. None found → **asset picker**: list the `.bin` assets and use the same smart offsets as §5.2.
+Only the asset named `esp-web-tool.json` (decided 2026-10-18; the other formats are read only when named directly). None found → **asset picker** (later): list the `.bin` assets and use the same smart offsets as §5.2.
 
 The manifest asset itself is also a release asset and hits the CORS problem, so it goes through the fetcher (§7.4).
 
@@ -439,8 +435,9 @@ Settings live in `localStorage`, so every browser (each computer or phone) keeps
 - **What is remembered**: the Manifest field (when it holds a URL or `owner/repo`), flash baud, Erase all / Verify / Reset after, monitor baud / format / line ending, log-level colors.
 - **Layout**: the active pane and fullscreen, per browser only, not per device (connecting a device moves focus to the monitor anyway).
 - **Last used**: the page starts with whatever was used most recently.
-- **Per USB device**: a full copy of all of the above is also kept per `vid:pid` (the 32 most recent devices). It is restored when that device is connected again (a remembered manifest is loaded again), so each board keeps its own manifest and monitor setup, and the message says "(settings restored)". A device seen for the first time keeps the current setup. Web Serial exposes no serial number, so two boards with the same USB ids (e.g. two native-USB ESP32-C5s, both `303a:1001`) share one entry.
-- **Not remembered**: picked files, including a picked manifest file. The browser drops access to them on reload; only a granted folder (`showDirectoryPicker`, §3.1) can be kept, in IndexedDB.
+- **Per USB device**: a full copy of all of the above is also kept per `vid:pid` (the 32 most recent devices). It is restored when that device is connected again (its flash plan too, or else its remembered manifest is loaded again), so each board keeps its own plan and monitor setup, and the message says "(settings restored)". A device seen for the first time keeps the current setup. Web Serial exposes no serial number, so two boards with the same USB ids (e.g. two native-USB ESP32-C5s, both `303a:1001`) share one entry.
+- **The flash plan, files included** (decided 2026-10-18), last used and per device like the rest. It lives in IndexedDB (`src/browser/plan-store.ts`, database `esp-web-tool`, store `plans`, keys `last` and `vid:pid`), because only IndexedDB can keep file and folder handles. It holds the Manifest field, the parsed manifest, release list and selection, set, status, and every row as edited (offset, on/off, path or file handle, lock). Part data is not stored; it is read again. Input saves at once; async changes (reads finishing) about 300 ms later.
+- **Permission after a reload**: Chrome keeps the handles but not the right to read them, unless the user chose "Allow on every visit". Rows needing it are red ("needs permission again (o)"), and a notice above the table says so. `o` (or a click on the notice) asks for all of them in one gesture (`requestPermission`). A page can't prompt without a gesture, so it doesn't ask on load. Files picked through the `<input type=file>` fallback have no handle and come back red ("not kept after reload: pick it again").
 - **Later**: theme, auto-monitor, timestamps, asset proxy URL, recent repos (last 10).
 - URL parameters override remembered settings for that visit.
 
@@ -523,6 +520,14 @@ Settings live in `localStorage`, so every browser (each computer or phone) keeps
   - The active pane and fullscreen are remembered.
   - The message says "(settings restored)".
   - Focus starts on the parts table, and Enter in the Manifest field moves focus there.
+- **Ninth pass (2026-10-18)**:
+  - Shorter Manifest placeholder; the help's key column sizes to its longest key (no clipped rows).
+  - Shorter errors: one manifest name is tried, and a fetch that fails is "unreachable or no CORS".
+  - Only `esp-web-tool.json` is looked for when no file is named.
+  - The whole flash plan, picked files included, is kept per device in IndexedDB; `o` asks for permission again after a reload.
+  - Bins can be URLs on any host or root paths, and can be typed.
+  - `r` is gone: `e` opens the part dialog (offset and file). `+ add part` sits one column away from the `▶` marker.
+  - A pushed commit that fails CI never deploys: `1af82bf` and `59085f8` failed on a test that read the screen before the redraw after a resize, so Pages stayed on `472e2ac` until the fix.
 
 ## 15. Open questions
 
@@ -530,7 +535,7 @@ Settings live in `localStorage`, so every browser (each computer or phone) keeps
 
 1. **CORS strategy**: decided (2026-10-18): **build the asset proxy** (§7.4), **once the rate-limit concern is settled**. Until then, GitHub release files show as red rows ("needs the asset proxy"), and URL manifests on CORS-enabled hosts work fully.
 2. **Where the manifest lives**: "in the release's root" could mean (a) a **release asset** (this draft), or (b) a file at the **repo root at the release tag**, fetched via `raw.githubusercontent.com`, which *is* CORS-enabled. (b) gets the manifest past CORS without a proxy, but the binaries would still need one. Should we support both?
-3. **Manifest filename**: `esp-web-tool.json` (matches the repo name) is what the code looks for. It was once written as `esp-web-tools.json`, but that is close to esp-web-tools' own project name and easy to confuse with it. Confirm the name.
+3. ~~Manifest filename~~: decided (2026-10-18), `esp-web-tool.json`, and it is the only name looked for when no file is named (folder URLs, releases).
 4. ~~Rendering~~: decided, a real TUI inside xterm.js (§3).
 5. **Asset download strategy** (§7.4): proxy decided (see 1); waiting on the rate-limit discussion.
 5b. **Proxy rate limit**: settle the concern before building the proxy (§7.4 lists the mitigations).

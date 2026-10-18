@@ -12,12 +12,23 @@ export interface FileHost {
   fetchBytes(url: string): Promise<Uint8Array>;
   /** GitHub API GET; throws FetchError (rate limit included). */
   fetchJson(url: string): Promise<unknown>;
+  /**
+   * A file or folder again from a handle kept across reloads (null if it can't be used).
+   * Reading it throws AccessError until the user allows it again (`requestAccess`).
+   */
+  restoreFile(handle: unknown): LocalFile | null;
+  restoreFolder(handle: unknown): LocalFolder | null;
+  /** Asks to read kept handles again; must run synchronously from input. */
+  requestAccess(handles: unknown[]): Promise<void>;
 }
 
 export interface LocalFile {
   name: string;
   read(): Promise<Uint8Array>;
-  /** Opaque browser handle (FileSystemFileHandle) when available, for `startIn`. */
+  /**
+   * Opaque browser handle (FileSystemFileHandle) when available: for `startIn`, and kept
+   * across reloads so the file can be read again.
+   */
   handle?: unknown;
 }
 
@@ -25,6 +36,10 @@ export interface LocalFolder {
   name: string;
   /** `path` relative to the folder, `/`-separated; throws FetchError ("not found"). */
   read(path: string): Promise<Uint8Array>;
+  /** Opaque FileSystemDirectoryHandle, kept across reloads. */
+  handle?: unknown;
 }
 
 export class FetchError extends Error {}
+/** A kept file or folder that the browser won't read until the user allows it again. */
+export class AccessError extends FetchError {}

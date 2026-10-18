@@ -10,6 +10,7 @@ import { WebglAddon } from '@xterm/addon-webgl';
 import { Terminal } from '@xterm/xterm';
 import { App, type DemoMode } from './app/app';
 import { browserFiles } from './browser/files';
+import { indexedDbStore } from './browser/plan-store';
 import { darkTheme } from './tui/theme';
 import { XtermTty } from './tty/xterm-tty';
 
@@ -144,6 +145,7 @@ async function main(): Promise<void> {
     openUrl: (url) => window.open(url, '_blank', 'noopener'),
     copy: (text) => copyText(text, () => term.focus()),
     storage: localStorageOrNone(),
+    plans: indexedDbStore(),
     demo: demoFromUrl(),
     files: browserFiles,
     assetProxy: import.meta.env.VITE_ASSET_PROXY as string | undefined,

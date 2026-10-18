@@ -1,7 +1,13 @@
 import { defaultRelease, listReleases, manifestAsset, type Release, viaProxy } from './github';
-import { FetchError, type FileHost, type LocalFile, type LocalFolder } from './host';
+import { AccessError, FetchError, type FileHost, type LocalFile, type LocalFolder } from './host';
 import { classify } from './locate';
-import { ManifestError, type Manifest, parseManifest, type PlanSet } from './manifest';
+import {
+  MANIFEST_NAME,
+  ManifestError,
+  type Manifest,
+  parseManifest,
+  type PlanSet,
+} from './manifest';
 import { guessOffset } from './offsets';
 
 /** One row of the parts table. */
@@ -12,8 +18,12 @@ export interface PlanRow {
   /** Offset came from the file name and may be wrong (bootloader before chip detection). */
   offsetGuessed: boolean;
   name: string;
-  /** Manifest path for manifest rows; null for files the user added. */
+  /**
+   * Where the data comes from: a path (relative to the manifest, or a URL on any host), or a
+   * file the user picked. Neither when a picked file couldn't be kept across a reload.
+   */
   path: string | null;
+  file: LocalFile | null;
   locked: boolean;
   sha256?: string;
   data: Uint8Array | null;
@@ -24,6 +34,36 @@ export interface PlanRow {
 
 export type PlanStatus = { kind: 'idle' | 'loading' | 'ok' | 'error'; text: string };
 
+/** A new or edited part's source: a typed path or URL, or a picked file. */
+export type PartSource = { path: string } | { file: LocalFile };
+
+/**
+ * Everything needed to bring a plan back after a reload (SPEC §10), kept in IndexedDB:
+ * structured-clonable, with file and folder handles in place of the files. Part data is not
+ * kept; it is read again.
+ */
+export interface SavedPlan {
+  base:
+    | { kind: 'url'; url: string }
+    | { kind: 'file'; name: string; file: unknown; folder: unknown }
+    | null;
+  manifest: Manifest | null;
+  setIndex: number;
+  releases: Release[] | null;
+  releaseIndex: number;
+  status: PlanStatus;
+  rows: {
+    enabled: boolean;
+    offset: number;
+    offsetGuessed: boolean;
+    name: string;
+    path: string | null;
+    file: unknown;
+    locked: boolean;
+    sha256?: string;
+  }[];
+}
+
 /** Where relative part paths resolve. */
 type Base =
   | { kind: 'url'; url: string }
@@ -31,9 +71,34 @@ type Base =
   | null;
 
 const NEEDS_FOLDER = 'needs folder access (o)';
-const isAbsolute = (p: string) => /^https?:\/\//i.test(p);
+const NEEDS_ACCESS = 'needs permission again (o)';
+const NOT_KEPT = 'not kept after reload: pick it again (e)';
 const baseName = (p: string) => p.split(/[\\/]/).pop() || p;
 const decoder = new TextDecoder();
+
+/**
+ * Where a part's path points. URLs may be on any host; with a URL manifest, relative and
+ * root paths resolve against it. With a local manifest, relative paths are in its folder, and
+ * absolute disk paths can't be read by a page at all.
+ */
+function locate(path: string, base: Base): { url: string } | { local: string } | { error: string } {
+  const p = path.trim();
+  if (/^https?:\/\//i.test(p)) return { url: p };
+  if (p.startsWith('//')) return { url: `https:${p}` };
+  if (base?.kind === 'url') {
+    try {
+      return { url: new URL(p, base.url).href };
+    } catch {
+      return { error: 'not a valid path' };
+    }
+  }
+  if (/^([a-z]:[\\/]|[\\/~])/i.test(p))
+    return { error: "disk paths can't be read: Browse for it (e)" };
+  if (base?.kind === 'file') return { local: p.replace(/\\/g, '/') };
+  // Typed without a manifest: `example.com/fw.bin` is a URL.
+  if (/^[\w-]+(\.[\w-]+)+(:\d+)?\//.test(p)) return { url: `https://${p}` };
+  return { error: 'relative to no manifest: type a URL or Browse (e)' };
+}
 
 /**
  * The flash plan behind the Flash pane (SPEC §5.2): loads a manifest from whatever the
@@ -76,9 +141,14 @@ export class FlashPlan {
     return this.releases?.[this.releaseIndex] ?? null;
   }
 
-  /** A local manifest whose relative parts can't be read until its folder is granted. */
-  get needsFolder(): boolean {
-    return this.rows.some((r) => r.error === NEEDS_FOLDER);
+  /**
+   * What `o` would grant: the folder of a local manifest (its relative parts can't be read
+   * until then), or permission again for files and folders kept across a reload.
+   */
+  get access(): 'folder' | 'again' | null {
+    if (this.rows.some((r) => r.error === NEEDS_FOLDER)) return 'folder';
+    if (this.rows.some((r) => r.error === NEEDS_ACCESS)) return 'again';
+    return null;
   }
 
   private setStatus(kind: PlanStatus['kind'], text: string): void {
@@ -117,22 +187,14 @@ export class FlashPlan {
       return;
     }
 
-    let lastError = '';
-    for (const url of target.candidates) {
-      this.setStatus('loading', `Reading ${url}…`);
-      try {
-        const m = parseManifest(decoder.decode(await this.host.fetchBytes(url)));
-        if (gen !== this.gen) return;
-        this.apply(m, { kind: 'url', url });
-        return;
-      } catch (err) {
-        if (gen !== this.gen) return;
-        lastError = `${baseName(new URL(url).pathname)}: ${message(err)}`;
-        // A folder URL tries the next name only when this one isn't there.
-        if (err instanceof ManifestError) break;
-      }
+    const url = target.url;
+    this.setStatus('loading', `Reading ${url}…`);
+    try {
+      const m = parseManifest(decoder.decode(await this.host.fetchBytes(url)));
+      if (gen === this.gen) this.apply(m, { kind: 'url', url });
+    } catch (err) {
+      if (gen === this.gen) this.fail(`${baseName(new URL(url).pathname)}: ${message(err)}`);
     }
-    this.fail(target.candidates.length > 1 ? `No manifest found (${lastError})` : lastError);
   }
 
   /** Switch to another release of the listed repo. */
@@ -147,9 +209,7 @@ export class FlashPlan {
     const asset = manifestAsset(r);
     if (!asset) {
       this.clearManifest();
-      return this.fail(
-        `Release ${r.tag} has no esp-web-tool.json, manifest.json or flasher_args.json`,
-      );
+      return this.fail(`Release ${r.tag} has no ${MANIFEST_NAME}`);
     }
     const url = viaProxy(asset.url, this.proxy);
     if (!url) {
@@ -195,16 +255,32 @@ export class FlashPlan {
     if (this.base?.kind === 'file') void this.loadFile(this.base.file);
   }
 
-  /** Folder picker for a local manifest's parts. Must run synchronously from input. */
-  grantFolder(): void {
+  /**
+   * `o`: the folder picker for a local manifest's parts, or permission again for what was
+   * kept across a reload. Must run synchronously from input.
+   */
+  grantAccess(): void {
     const base = this.base;
-    if (base?.kind !== 'file') return;
-    void this.host.pickFolder(base.file).then((folder) => {
-      if (!folder || this.base !== base) return;
-      base.folder = folder;
-      for (const row of this.rows) if (row.path && row.error === NEEDS_FOLDER) this.fetchRow(row);
-      this.onChange();
-    });
+    if (this.access === 'folder' && base?.kind === 'file') {
+      void this.host.pickFolder(base.file).then((folder) => {
+        if (!folder || this.base !== base) return;
+        base.folder = folder;
+        for (const row of this.rows) if (row.error === NEEDS_FOLDER) this.readRow(row);
+        this.onChange();
+      });
+      return;
+    }
+    const waiting = this.rows.filter((r) => r.error === NEEDS_ACCESS);
+    const handles = new Set<unknown>();
+    for (const row of waiting) {
+      const h = row.file ? row.file.handle : base?.kind === 'file' ? base.folder?.handle : null;
+      if (h) handles.add(h);
+    }
+    if (!handles.size) return;
+    void this.host.requestAccess([...handles]).then(
+      () => waiting.forEach((row) => this.readRow(row)),
+      () => {},
+    );
   }
 
   private apply(m: Manifest, base: Base): void {
@@ -230,6 +306,7 @@ export class FlashPlan {
       offsetGuessed: false,
       name: baseName(p.path),
       path: p.path,
+      file: null,
       locked: p.locked,
       sha256: p.sha256,
       data: null,
@@ -240,7 +317,7 @@ export class FlashPlan {
     const sets = m.sets.length > 1 ? ` · ${m.sets.length} sets` : '';
     this.setStatus('ok', `${what}${sets} (${m.format})`);
     this.onSet?.(set);
-    for (const row of this.rows) this.fetchRow(row);
+    for (const row of this.rows) this.readRow(row);
   }
 
   private clearManifest(): void {
@@ -253,24 +330,21 @@ export class FlashPlan {
     this.setStatus('error', text);
   }
 
-  /** Read one manifest part relative to the manifest; the row turns red if it can't be. */
-  private fetchRow(row: PlanRow): void {
-    const path = row.path!;
+  /** Read a row's data from its file or path; the row turns red if it can't be. */
+  private readRow(row: PlanRow): void {
+    const fail = (why: string) => this.settle(row, Promise.reject(new FetchError(why)));
+    if (row.file) return this.settle(row, row.file.read());
+    if (row.path === null) return fail(NOT_KEPT);
     const base = this.base;
-    let job: Promise<Uint8Array>;
-    if (isAbsolute(path) || base?.kind === 'url') {
-      const url = isAbsolute(path) ? path : new URL(path, (base as { url: string }).url).href;
-      const proxied = new URL(url).hostname === 'github.com' ? viaProxy(url, this.proxy) : url;
-      if (!proxied)
-        return this.settle(row, Promise.reject(new FetchError('needs the asset proxy')));
-      job = this.host.fetchBytes(proxied);
-    } else if (base?.kind === 'file') {
-      if (!base.folder) return this.settle(row, Promise.reject(new FetchError(NEEDS_FOLDER)));
-      job = base.folder.read(path);
-    } else {
-      return this.settle(row, Promise.reject(new FetchError('no manifest location')));
+    const at = locate(row.path, base);
+    if ('error' in at) return fail(at.error);
+    if ('local' in at) {
+      const folder = base?.kind === 'file' ? base.folder : null;
+      return folder ? this.settle(row, folder.read(at.local)) : fail(NEEDS_FOLDER);
     }
-    this.settle(row, job);
+    const url = new URL(at.url).hostname === 'github.com' ? viaProxy(at.url, this.proxy) : at.url;
+    if (!url) return fail('needs the asset proxy');
+    this.settle(row, this.host.fetchBytes(url));
   }
 
   /** Load a row's data from `job`; only the row's latest job may update it. */
@@ -289,55 +363,58 @@ export class FlashPlan {
     const sha256 = row.sha256;
     job.then(
       async (data) => done(data, await checkData(data, sha256)),
-      (err: unknown) => done(null, message(err)),
+      (err: unknown) => done(null, err instanceof AccessError ? NEEDS_ACCESS : message(err)),
     );
   }
 
   // ---------------------------------------------------------------------------
   // Editing (SPEC §5.2): always possible, except on rows the manifest locks.
 
-  /** File picker for extra parts. Must run synchronously from a key press or click. */
-  addFiles(): void {
-    void this.host.pickFiles({ multiple: true }).then((files) => {
-      for (const file of files) {
-        const { offset, guessed } = guessOffset(
-          file.name,
-          this.rows.map((r) => ({ offset: r.offset, size: r.data?.length ?? 0 })),
-        );
-        const row: PlanRow = {
-          id: this.nextId++,
-          enabled: true,
-          offset,
-          offsetGuessed: guessed,
-          name: file.name,
-          path: null,
-          locked: false,
-          data: null,
-          loading: true,
-          error: null,
-        };
-        this.rows.push(row);
-        this.readLocal(row, file);
-      }
-      this.onChange();
-    });
+  /** File picker for parts. Must run synchronously from a key press or click. */
+  browse(multiple: boolean): Promise<LocalFile[]> {
+    return this.host.pickFiles({ multiple });
   }
 
-  /** Replace a row's file with a local one. Must run synchronously from input. */
-  replaceFile(row: PlanRow): boolean {
+  /** Add a part; a null offset is guessed from the name (after the parts already there). */
+  addPart(source: PartSource, offset: number | null): PlanRow {
+    const name = 'file' in source ? source.file.name : baseName(source.path);
+    const guess = guessOffset(
+      name,
+      this.rows.map((r) => ({ offset: r.offset, size: r.data?.length ?? 0 })),
+    );
+    const row: PlanRow = {
+      id: this.nextId++,
+      enabled: true,
+      offset: offset ?? guess.offset,
+      offsetGuessed: offset === null && guess.guessed,
+      name,
+      path: 'path' in source ? source.path.trim() : null,
+      file: 'file' in source ? source.file : null,
+      locked: false,
+      data: null,
+      loading: true,
+      error: null,
+    };
+    this.rows.push(row);
+    this.readRow(row);
+    this.onChange();
+    return row;
+  }
+
+  /** Change a row's offset and, given a source, its file. False when the row is locked. */
+  editRow(row: PlanRow, offset: number, source: PartSource | null): boolean {
     if (row.locked) return false;
-    void this.host.pickFiles({ multiple: false }).then(([file]) => {
-      if (!file) return;
-      row.name = file.name;
-      row.path = null;
-      row.sha256 = undefined;
-      this.readLocal(row, file);
-    });
+    row.offset = offset;
+    row.offsetGuessed = false;
+    if (source) {
+      row.name = 'file' in source ? source.file.name : baseName(source.path);
+      row.path = 'path' in source ? source.path.trim() : null;
+      row.file = 'file' in source ? source.file : null;
+      row.sha256 = undefined; // the manifest's hash was for the old file
+      this.readRow(row);
+    }
+    this.onChange();
     return true;
-  }
-
-  private readLocal(row: PlanRow, file: LocalFile): void {
-    this.settle(row, file.read());
   }
 
   deleteRow(row: PlanRow): boolean {
@@ -347,19 +424,77 @@ export class FlashPlan {
     return true;
   }
 
-  setOffset(row: PlanRow, offset: number): boolean {
-    if (row.locked) return false;
-    row.offset = offset;
-    row.offsetGuessed = false;
-    this.onChange();
-    return true;
-  }
-
   toggle(row: PlanRow): boolean {
     if (row.locked) return false;
     row.enabled = !row.enabled;
     this.onChange();
     return true;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Kept across reloads (SPEC §10)
+
+  save(): SavedPlan {
+    const b = this.base;
+    return {
+      base:
+        b?.kind === 'url'
+          ? { kind: 'url', url: b.url }
+          : b?.kind === 'file'
+            ? { kind: 'file', name: b.file.name, file: b.file.handle, folder: b.folder?.handle }
+            : null,
+      manifest: this.manifest,
+      setIndex: this.setIndex,
+      releases: this.releases,
+      releaseIndex: this.releaseIndex,
+      status: this.status,
+      rows: this.rows.map((r) => ({
+        enabled: r.enabled,
+        offset: r.offset,
+        offsetGuessed: r.offsetGuessed,
+        name: r.name,
+        path: r.path,
+        file: r.file?.handle,
+        locked: r.locked,
+        sha256: r.sha256,
+      })),
+    };
+  }
+
+  /**
+   * Bring back a saved plan and read its parts again. Kept local files and folders turn into
+   * "needs permission again (o)" rows until the user allows them (`grantAccess`).
+   */
+  restore(saved: SavedPlan): void {
+    this.gen++;
+    const restoreFile = (h: unknown) => (h ? this.host.restoreFile(h) : null);
+    const b = saved.base;
+    this.manifest = saved.manifest;
+    this.setIndex = saved.setIndex;
+    this.releases = saved.releases;
+    this.releaseIndex = saved.releaseIndex;
+    this.status = saved.status.kind === 'loading' ? { kind: 'idle', text: '' } : saved.status;
+    this.localName = b?.kind === 'file' ? b.name : null;
+    this.base =
+      b?.kind === 'url'
+        ? { kind: 'url', url: b.url }
+        : b?.kind === 'file'
+          ? {
+              kind: 'file',
+              file: restoreFile(b.file) ?? lostFile(b.name),
+              folder: b.folder ? this.host.restoreFolder(b.folder) : null,
+            }
+          : null;
+    this.rows = saved.rows.map((r) => ({
+      ...r,
+      id: this.nextId++,
+      file: restoreFile(r.file),
+      data: null,
+      loading: true,
+      error: null,
+    }));
+    for (const row of this.rows) this.readRow(row);
+    this.onChange();
   }
 
   /** Why flashing can't start, or null. */
@@ -378,6 +513,12 @@ export class FlashPlan {
     return null;
   }
 }
+
+/** A picked manifest that couldn't be kept (no handle in this browser). */
+const lostFile = (name: string): LocalFile => ({
+  name,
+  read: () => Promise.reject(new FetchError(`${name} was not kept: open it again`)),
+});
 
 async function checkData(data: Uint8Array, sha256: string | undefined): Promise<string | null> {
   if (data.length === 0) return 'empty file';

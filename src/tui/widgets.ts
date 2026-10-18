@@ -611,12 +611,22 @@ export function keyBar(ctx: Ctx, r: Rect, hints: KeyHint[]): void {
   }
 }
 
-/** Draws a centered dialog frame and returns its inner rect. Clicks outside it are swallowed. */
-export function dialog(ctx: Ctx, title: string, w: number, h: number, color?: number): Rect {
+/**
+ * Draws a dialog frame centered on `within` (default: the screen) and returns its inner rect.
+ * Clicks outside it are swallowed.
+ */
+export function dialog(
+  ctx: Ctx,
+  title: string,
+  w: number,
+  h: number,
+  color?: number,
+  within?: Rect,
+): Rect {
   const { screen, theme } = ctx;
   const full = { x: 0, y: 0, w: screen.cols, h: screen.rows };
   ctx.hits.add(full, () => {});
-  const r = centered(full, w, h);
+  const r = centered(within ?? full, w, h);
   screen.fill(r, ' ', { bg: theme.inputBg });
   const inner = panel(ctx, r, title, true, {
     color: color ?? theme.borderFocus,

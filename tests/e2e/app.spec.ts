@@ -92,7 +92,7 @@ test.describe('app', () => {
     expect(text).toContain('Flash');
     expect(text).toContain('Monitor');
     expect(text).toContain('Manifest');
-    expect(text).toContain('+ add file');
+    expect(text).toContain('+ add part');
     expect(text).toContain('not connected');
   });
 
@@ -358,24 +358,84 @@ test.describe('app', () => {
 
     await page.keyboard.press('d'); // Enter moved focus to the parts table; this row is locked
     await expectOnScreen(page, 'bootloader.bin is locked by the manifest');
-    await page.keyboard.press('G'); // the "+ add file" line
+    await page.keyboard.press('G'); // the "+ add part" line
     await page.keyboard.press('k'); // missing.bin
     await page.keyboard.press('d');
     await expect.poll(async () => (await screenText(page)).join()).not.toContain('missing.bin');
 
-    // Add a local file, then move it.
+    // Add a local file (Enter on the empty File field browses), then move it.
     await page.evaluate(() => (window as any).__picks.push([{ name: 'extra.bin', size: 300 }]));
     await page.keyboard.press('a');
+    await expectOnScreen(page, 'Add part');
+    await page.keyboard.press('Enter');
+    await expectOnScreen(page, '[extra.bin');
+    await page.keyboard.press('Enter');
     await expectOnScreen(page, '0x020000  extra.bin');
     await page.keyboard.press('G');
     await page.keyboard.press('k');
     await page.keyboard.press('e');
+    await expectOnScreen(page, 'Edit part');
     await page.keyboard.press('Control+u');
     await page.keyboard.type('300000');
     await page.keyboard.press('Enter');
     await expectOnScreen(page, '0x300000  extra.bin');
+
+    // A part typed as a URL on another host, then given a new file by path.
+    await page.keyboard.press('a');
+    await page.keyboard.type('https://cdn.test/x/other.bin');
+    await page.keyboard.press('Shift+Tab');
+    await page.keyboard.type('0x400000');
+    await page.keyboard.press('Enter');
+    await expectOnScreen(page, 'other.bin');
+    await expectOnScreen(page, 'unreachable or no CORS');
+    await page.keyboard.press('G');
+    await page.keyboard.press('k');
+    await page.keyboard.press('e');
+    await page.keyboard.press('Tab');
+    await page.keyboard.press('Control+u');
+    await page.keyboard.type('app.bin'); // relative to the manifest
+    await page.keyboard.press('Enter');
+    await expectOnScreen(page, '0x400000  app.bin');
     await page.keyboard.press('F');
     await expectOnScreen(page, 'Flash (simulated)');
+  });
+
+  test('the flash plan is kept across reloads, edits included', async ({ page }) => {
+    const manifest = {
+      name: 'Kept',
+      sets: [
+        {
+          id: 'one',
+          parts: [
+            { path: 'app.bin', offset: '0x10000' },
+            { path: 'data.bin', offset: '0x200000' },
+          ],
+        },
+      ],
+    };
+    const cors = { 'access-control-allow-origin': '*' };
+    await page.route('https://fw.test/**', (route) =>
+      route.request().url().endsWith('.json')
+        ? route.fulfill({ headers: cors, body: JSON.stringify(manifest) })
+        : route.fulfill({ headers: cors, body: Buffer.alloc(1024, 0xe9) }),
+    );
+    await page.keyboard.press('Shift+Tab');
+    await page.keyboard.type('fw.test/kept');
+    await page.keyboard.press('Enter');
+    await expectOnScreen(page, 'Kept (esp-web-tool)');
+    await page.keyboard.press('j'); // data.bin
+    await page.keyboard.press('d');
+    await page.keyboard.press('k');
+    await page.keyboard.press('e');
+    await page.keyboard.press('Control+u');
+    await page.keyboard.type('20000');
+    await page.keyboard.press('Enter');
+    await expectOnScreen(page, '0x020000  app.bin');
+
+    await page.reload();
+    await expectOnScreen(page, 'Kept (esp-web-tool)');
+    await expectOnScreen(page, '0x020000  app.bin');
+    expect((await screenText(page)).join()).not.toContain('data.bin');
   });
 
   test('a picked local manifest reads its parts once its folder is granted', async ({ page }) => {
@@ -443,6 +503,8 @@ test.describe('app', () => {
   test('help overlay opens and closes', async ({ page }) => {
     await page.keyboard.press('?');
     await expectOnScreen(page, 'Help · Esc to close');
+    // The key column fits its longest key.
+    await expectOnScreen(page, 'double / triple click  select a word');
     await page.keyboard.press('Escape');
     await expect
       .poll(async () => (await screenText(page)).join('\n'))

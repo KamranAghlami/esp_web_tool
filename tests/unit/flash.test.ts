@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { classify } from '../../src/flash/locate';
-import { FetchError, type FileHost, type LocalFile } from '../../src/flash/host';
+import { AccessError, FetchError, type FileHost, type LocalFile } from '../../src/flash/host';
 import { parseManifest } from '../../src/flash/manifest';
 import { guessOffset, parseOffset } from '../../src/flash/offsets';
 import { FlashPlan } from '../../src/flash/plan';
@@ -80,15 +80,12 @@ describe('what the Manifest field points at', () => {
     expect(classify('https://github.com/o/r/releases/tag/v1.0')).toMatchObject({ tag: 'v1.0' });
     expect(classify('https://x.dev/fw/m.json')).toEqual({
       kind: 'url',
-      candidates: ['https://x.dev/fw/m.json'],
+      url: 'https://x.dev/fw/m.json',
     });
+    // No file named: only our manifest is looked for.
     expect(classify('example.com/fw')).toEqual({
       kind: 'url',
-      candidates: [
-        'https://example.com/fw/esp-web-tool.json',
-        'https://example.com/fw/manifest.json',
-        'https://example.com/fw/flasher_args.json',
-      ],
+      url: 'https://example.com/fw/esp-web-tool.json',
     });
   });
 });
@@ -104,10 +101,23 @@ describe('offsets', () => {
   });
 });
 
-/** A fake browser: URL → bytes, plus queued picker results. */
+/**
+ * A fake browser: URL → bytes, queued picker results, and kept handles (plain ids here) that
+ * need `requestAccess` again after a "reload" (`forget()`).
+ */
 function fakeHost(urls: Record<string, Uint8Array>) {
   const picks: LocalFile[][] = [];
   let folder: Record<string, Uint8Array> | null = null;
+  const disk = new Map<string, Uint8Array>();
+  const allowed = new Set<string>();
+  const kept = (id: string): LocalFile => ({
+    name: id,
+    handle: id,
+    read: async () => {
+      if (!allowed.has(id)) throw new AccessError('needs permission again');
+      return disk.get(id)!;
+    },
+  });
   const host: FileHost = {
     pickFiles: () => Promise.resolve(picks.shift() ?? []),
     pickFolder: () =>
@@ -129,11 +139,17 @@ function fakeHost(urls: Record<string, Uint8Array>) {
     fetchJson: async () => {
       throw new FetchError('no network in tests');
     },
+    restoreFile: (h) => (typeof h === 'string' && disk.has(h) ? kept(h) : null),
+    restoreFolder: () => null,
+    requestAccess: async (handles) => handles.forEach((h) => allowed.add(h as string)),
   };
   return {
     host,
     pick: (...files: LocalFile[]) => picks.push(files),
     grant: (files: Record<string, Uint8Array>) => (folder = files),
+    /** A picked file with a handle, as Chrome gives them. */
+    keep: (id: string, data: Uint8Array) => (disk.set(id, data), allowed.add(id), kept(id)),
+    forget: () => allowed.clear(),
   };
 }
 
@@ -160,7 +176,7 @@ describe('FlashPlan', () => {
     expect(plan.problem()).toBeNull();
     // Locked rows refuse every edit.
     const locked = plan.rows[0]!;
-    expect([plan.toggle(locked), plan.deleteRow(locked), plan.setOffset(locked, 4)]).toEqual([
+    expect([plan.toggle(locked), plan.deleteRow(locked), plan.editRow(locked, 4, null)]).toEqual([
       false,
       false,
       false,
@@ -173,28 +189,108 @@ describe('FlashPlan', () => {
     await plan.loadFile(file('esp-web-tool.json', enc.encode(JSON.stringify(OURS))));
     await settle();
     expect(plan.localName).toBe('esp-web-tool.json');
-    expect(plan.needsFolder).toBe(true);
+    expect(plan.access).toBe('folder');
     grant({ 'bootloader.bin': bytes(10), 'app.bin': bytes(20) });
-    plan.grantFolder();
+    plan.grantAccess();
     await settle();
     await settle();
     expect(plan.rows.map((r) => r.data?.length)).toEqual([10, 20]);
-    expect(plan.needsFolder).toBe(false);
+    expect(plan.access).toBeNull();
   });
 
   it('adds local files with guessed offsets and catches overlaps', async () => {
-    const { host, pick } = fakeHost({});
+    const { host } = fakeHost({});
     const plan = new FlashPlan(host, () => {});
-    pick(file('bootloader.bin', bytes(0x9000)), file('my-app.bin', bytes(0x100)));
-    plan.addFiles();
+    plan.addPart({ file: file('bootloader.bin', bytes(0x9000)) }, null);
     await settle();
+    plan.addPart({ file: file('my-app.bin', bytes(0x100)) }, null);
     await settle();
     expect(plan.rows.map((r) => [r.name, r.offset, r.offsetGuessed])).toEqual([
       ['bootloader.bin', 0, true],
       ['my-app.bin', 0x10000, false],
     ]);
-    plan.setOffset(plan.rows[1]!, 0x8000);
+    plan.editRow(plan.rows[1]!, 0x8000, null);
     expect(plan.problem()).toBe('bootloader.bin overlaps my-app.bin');
+  });
+
+  it('reads parts from URLs on any host, and typed paths or URLs', async () => {
+    const { host } = fakeHost({
+      'https://x.dev/fw/m.json': enc.encode(
+        JSON.stringify({
+          sets: [
+            {
+              id: 'a',
+              parts: [
+                { path: 'https://cdn.other.net/boot.bin', offset: 0 },
+                { path: '/root.bin', offset: 0x8000 },
+              ],
+            },
+          ],
+        }),
+      ),
+      'https://cdn.other.net/boot.bin': bytes(16),
+      'https://x.dev/root.bin': bytes(16),
+      'https://x.dev/fw/extra.bin': bytes(16),
+    });
+    const plan = new FlashPlan(host, () => {});
+    await plan.load('https://x.dev/fw/m.json');
+    await settle();
+    expect(plan.rows.map((r) => r.error)).toEqual([null, null]);
+    // A typed relative path resolves against the manifest; editing the file drops its hash.
+    plan.addPart({ path: 'extra.bin' }, 0x10000);
+    const row = plan.rows[0]!;
+    row.sha256 = 'ab';
+    plan.editRow(row, 0, { path: 'missing.bin' });
+    await settle();
+    expect(plan.rows.map((r) => [r.name, r.error])).toEqual([
+      ['missing.bin', 'not found (404)'],
+      ['root.bin', null],
+      ['extra.bin', null],
+    ]);
+    expect(row.sha256).toBeUndefined();
+
+    // Without a manifest, a relative path has nothing to resolve against.
+    const bare = new FlashPlan(host, () => {});
+    bare.addPart({ path: 'fw.bin' }, null);
+    bare.addPart({ path: 'x.dev/fw/extra.bin' }, null);
+    await settle();
+    expect(bare.rows.map((r) => r.error)).toEqual([
+      'relative to no manifest: type a URL or Browse (e)',
+      null,
+    ]);
+  });
+
+  it('keeps everything across a reload; kept files need permission again', async () => {
+    const { host, keep, forget } = fakeHost({
+      'https://x.dev/fw/esp-web-tool.json': enc.encode(JSON.stringify(OURS)),
+      'https://x.dev/fw/bootloader.bin': bytes(100),
+      'https://x.dev/fw/app.bin': bytes(200),
+    });
+    const plan = new FlashPlan(host, () => {});
+    await plan.load('x.dev/fw');
+    plan.selectSet(0);
+    plan.toggle(plan.rows[1]!);
+    plan.addPart({ file: keep('mine.bin', bytes(30)) }, 0x200000);
+    plan.addPart({ file: file('no-handle.bin', bytes(30)) }, 0x300000);
+    await settle();
+    const saved = structuredClone(plan.save()); // must survive IndexedDB
+
+    forget();
+    const again = new FlashPlan(host, () => {});
+    again.restore(saved);
+    await settle();
+    expect(again.status.text).toBe('My FW 1.2.0 · 2 sets (esp-web-tool)');
+    expect(again.rows.map((r) => [r.name, r.enabled, r.offset, r.error])).toEqual([
+      ['bootloader.bin', true, 0, null],
+      ['app.bin', false, 0x10000, null],
+      ['mine.bin', true, 0x200000, 'needs permission again (o)'],
+      ['no-handle.bin', true, 0x300000, 'not kept after reload: pick it again (e)'],
+    ]);
+    expect(again.access).toBe('again');
+    again.grantAccess();
+    await settle();
+    await settle();
+    expect(again.rows[2]!.data?.length).toBe(30);
   });
 
   it('says when GitHub release files need the asset proxy', async () => {
