@@ -10,7 +10,6 @@ export const HELP: [string, string?][] = [
   ['s', 'cycle source: Files / GitHub / URL'],
   ['D', 'dump (read) flash to a file (M1)'],
   ['?', 'this help'],
-  ['Capital letters', 'cannot be undone: F flash, E erase, Ctrl-A C'],
   [''],
   ['Lists and fields'],
   ['↑ ↓  j k', 'move; PgUp/PgDn, g/G jump'],

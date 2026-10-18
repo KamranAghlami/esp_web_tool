@@ -416,9 +416,11 @@ Query parameters (they can be combined):
 
 The tool never starts flashing from a link alone; the user always confirms.
 
-Settings live in `localStorage`, so every browser (each computer or phone) keeps its own. Best effort: blocked or full storage just means nothing sticks. They are saved after each input that changes them (`src/app/settings.ts`, key `esp-web-tool:settings:v1`). Every field is validated on load and falls back to its default.
-- **Now**: flash baud, Erase all / Verify / Reset after, monitor baud / format / line ending, log-level colors. The flash source and the repo/manifest URL fields are deliberately *not* remembered: each visit starts on Files, and links prefill them (`?repo=`, `?manifest=`).
-- **Per USB device**: baud, format and line ending are also remembered per `vid:pid` (the 32 most recent devices). They are applied when that device is connected again, and the message says "remembered settings". Web Serial exposes no serial number, so two boards with the same USB ids (e.g. two native-USB ESP32-C5s, both `303a:1001`) share one entry.
+Settings live in `localStorage`, so every browser (each computer or phone) keeps its own. Best effort: blocked or full storage just means nothing sticks. They are saved after each input that changes them (`src/app/settings.ts`, key `esp-web-tool:settings:v2`). Every field is validated on load and falls back to its default.
+- **What is remembered**: flash source, repo and manifest URL fields, flash baud, Erase all / Verify / Reset after, monitor baud / format / line ending, log-level colors.
+- **Last used**: the page starts with whatever was used most recently.
+- **Per USB device**: a full copy of all of the above is also kept per `vid:pid` (the 32 most recent devices). It is restored when that device is connected again, so each board keeps its own flash source and monitor setup, and the message says "remembered settings". A device seen for the first time keeps the current setup. Web Serial exposes no serial number, so two boards with the same USB ids (e.g. two native-USB ESP32-C5s, both `303a:1001`) share one entry.
+- **Not remembered**: picked files. The browser drops access to them on reload; only a granted folder (`showDirectoryPicker`, §3.1) can be kept, in IndexedDB.
 - **Later**: theme, auto-monitor, timestamps, asset proxy URL, recent repos (last 10).
 - URL parameters override remembered settings for that visit.
 
@@ -493,6 +495,7 @@ Settings live in `localStorage`, so every browser (each computer or phone) keeps
   - The flash source and repo/URL fields are no longer remembered.
   - Toasts became bottom-bar messages.
   - `f` is Fullscreen everywhere, `F` is Flash (capitals = cannot be undone), and Ctrl+A `C` clears.
+- **Seventh pass (2026-10-18)**: everything (flash and monitor) is remembered as "last used" and per USB device. Picked files can't be kept.
 
 ## 15. Open questions
 

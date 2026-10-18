@@ -271,7 +271,11 @@ test.describe('app', () => {
   });
 
   test('settings are remembered across reloads, and per USB device', async ({ page }) => {
-    // Monitor defaults and flash options stick in this browser.
+    // Last-used settings stick in this browser: flash source and repo, monitor setup.
+    await page.keyboard.press('s'); // source → GitHub
+    await page.keyboard.press('Tab');
+    await page.keyboard.type('espressif/esp-idf');
+    await page.keyboard.press('Escape');
     await page.keyboard.press('2');
     await page.keyboard.press('Control+a');
     await page.keyboard.press('h'); // colors off
@@ -280,14 +284,14 @@ test.describe('app', () => {
     await page.keyboard.press('b');
     await clickText(page, info, '74880');
     await page.reload();
-    await expectOnScreen(page, 'ESP Web Tool');
+    await expectOnScreen(page, 'espressif/esp-idf');
     await page.keyboard.press('2');
     await page.keyboard.press('Control+a');
     await expectOnScreen(page, 'Settings: 74880 8N1 LF ▸');
     expect(await page.evaluate(() => (window as any).__espwt.app.monitor.colorize)).toBe(false);
     await page.keyboard.press('Escape');
 
-    // The fake device (303a:1001) gets 230400 while connected...
+    // The fake device (303a:1001) is new: it keeps the current setup, then gets 230400.
     await page.keyboard.press('c');
     await expectOnScreen(page, '@ 74880 8N1');
     await page.keyboard.press('Control+a');
@@ -297,12 +301,20 @@ test.describe('app', () => {
     await expectOnScreen(page, '@ 230400 8N1');
     await page.keyboard.press('c'); // disconnect
     await expectOnScreen(page, 'not connected');
-    // ...and keeps it after a reload, whatever the default is meanwhile.
+
+    // Meanwhile another repo is typed (it becomes the last used)...
+    await page.keyboard.press('1');
+    await page.keyboard.press('Tab');
+    await page.keyboard.press('Control+u');
+    await page.keyboard.type('someone/else');
+    await page.keyboard.press('Escape');
     await page.reload();
-    await expectOnScreen(page, 'ESP Web Tool');
+    await expectOnScreen(page, 'someone/else');
+    // ...but connecting the device brings back everything it had.
     await page.keyboard.press('c');
     await expectOnScreen(page, '@ 230400 8N1');
     await expectOnScreen(page, 'remembered settings');
+    await expectOnScreen(page, 'espressif/esp-idf');
   });
 
   test('help scrolls with the mouse wheel', async ({ page }) => {

@@ -31,8 +31,8 @@ import { HELP } from './help';
 import { LINE_ENDINGS, MonitorPane } from './monitor-pane';
 import {
   type KeyValueStore,
-  rememberPort,
-  type SerialSettings,
+  type DeviceSettings,
+  rememberDevice,
   type Settings,
   SettingsStore,
 } from './settings';
@@ -164,7 +164,7 @@ export class App {
     this.startDemo = opts.demo ?? 'off';
     this.store = new SettingsStore(opts.storage);
     this.settings = this.store.load();
-    this.applySettings();
+    this.applySettings(this.settings.last);
 
     this.tty.onData((d) => this.onData(d));
     this.tty.onResize(() => {
@@ -221,40 +221,50 @@ export class App {
   // -------------------------------------------------------------------------
   // Settings
 
-  private applySettings(): void {
-    const { flash, monitor } = this.settings;
+  /** Puts a remembered snapshot into the widgets and the port manager. */
+  private applySettings({ flash, monitor }: DeviceSettings): void {
     const f = this.flash;
+    f.source.value = flash.source;
+    f.repo.setValue(flash.repo);
+    f.url.setValue(flash.url);
     f.baud.index = Math.max(0, BAUD_RATES.indexOf(flash.baud as (typeof BAUD_RATES)[number]));
     f.eraseAll.checked = flash.eraseAll;
     f.verify.checked = flash.verify;
     f.resetAfter.checked = flash.resetAfter;
-    this.applySerial(monitor);
+    this.flashFocus = Math.min(this.flashFocus, f.focusables().length - 1);
+    this.ports.baudRate = monitor.baud;
+    this.ports.format = monitor.format;
+    this.monitor.eol = monitor.eol;
     if (this.monitor.colorize !== monitor.colorize) this.monitor.toggleColorize();
   }
 
-  private applySerial(s: SerialSettings): void {
-    this.ports.baudRate = s.baud;
-    this.ports.format = s.format;
-    this.monitor.eol = s.eol;
-  }
-
-  private currentSerial(): SerialSettings {
-    return { baud: this.ports.baudRate, format: this.ports.format, eol: this.monitor.eol };
-  }
-
-  /** Snapshot the current state; written only if it changed. */
-  private saveSettings(): void {
+  private snapshot(): DeviceSettings {
     const f = this.flash;
-    const s = this.settings;
-    s.flash = {
-      baud: f.baud.value,
-      eraseAll: f.eraseAll.checked,
-      verify: f.verify.checked,
-      resetAfter: f.resetAfter.checked,
+    return {
+      flash: {
+        source: f.source.value,
+        repo: f.repo.value,
+        url: f.url.value,
+        baud: f.baud.value,
+        eraseAll: f.eraseAll.checked,
+        verify: f.verify.checked,
+        resetAfter: f.resetAfter.checked,
+      },
+      monitor: {
+        baud: this.ports.baudRate,
+        format: this.ports.format,
+        eol: this.monitor.eol,
+        colorize: this.monitor.colorize,
+      },
     };
-    s.monitor = { ...this.currentSerial(), colorize: this.monitor.colorize };
+  }
+
+  /** Records the current state as the last used, and for the connected device; written if changed. */
+  private saveSettings(): void {
+    const s = this.settings;
+    s.last = this.snapshot();
     const key = this.ports.port && portKey(this.ports.port);
-    if (key && this.ports.state === 'open') rememberPort(s.ports, key, this.currentSerial());
+    if (key && this.ports.state === 'open') rememberDevice(s.devices, key, s.last);
     this.store.save(s);
   }
 
@@ -630,10 +640,10 @@ export class App {
       .request()
       .then((port) => {
         record.result = 'granted';
-        // A device seen before gets the serial settings it had last time.
+        // A device seen before gets back everything it had last time (flash and monitor).
         const key = portKey(port);
-        const known = key ? this.settings.ports[key] : undefined;
-        if (known) this.applySerial(known);
+        const known = key ? this.settings.devices[key] : undefined;
+        if (known) this.applySettings(known);
         return ports.open(port).then(() => {
           this.setDemo('off');
           this.monitor.clear();

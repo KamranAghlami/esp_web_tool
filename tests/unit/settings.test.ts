@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  defaultDeviceSettings,
   defaultSettings,
-  MAX_PORTS,
+  MAX_DEVICES,
   parseSettings,
-  rememberPort,
+  rememberDevice,
   SettingsStore,
-  STORAGE_KEY,
 } from '../../src/app/settings';
 
 class MemoryStore {
@@ -28,39 +28,49 @@ describe('settings', () => {
     expect(s).toEqual(defaultSettings());
     store.save(s);
     expect(mem.writes).toBe(0);
-    s.monitor.baud = 460800;
-    s.flash.verify = false;
-    rememberPort(s.ports, '303a:1001', { baud: 230400, format: '8E1', eol: 2 });
+    s.last.monitor.baud = 460800;
+    s.last.flash.source = 'github';
+    s.last.flash.repo = 'espressif/esp-idf';
+    rememberDevice(s.devices, '303a:1001', s.last);
     store.save(s);
     expect(mem.writes).toBe(1);
     expect(new SettingsStore(mem).load()).toEqual(s);
+  });
+
+  it('copies a device snapshot, so later edits to `last` do not leak into it', () => {
+    const s = defaultSettings();
+    rememberDevice(s.devices, '303a:1001', s.last);
+    s.last.flash.repo = 'changed';
+    expect(s.devices['303a:1001']!.flash.repo).toBe('');
   });
 
   it('falls back to defaults for junk, field by field', () => {
     expect(parseSettings('not json')).toEqual(defaultSettings());
     const s = parseSettings(
       JSON.stringify({
-        flash: { source: 'github', repo: 'a/b', baud: 123, verify: false },
-        monitor: { baud: -5, format: '9X9', eol: 7, colorize: false },
-        ports: { 'bad key': { baud: 9600 }, '10c4:ea60': { baud: 74880, format: '7E1' } },
+        last: {
+          flash: { source: 'ftp', repo: 'a/b', baud: 123, verify: false },
+          monitor: { baud: -5, format: '9X9', eol: 7, colorize: false },
+        },
+        devices: { 'bad key': {}, '10c4:ea60': { monitor: { baud: 74880, format: '7E1' } } },
       }),
     );
-    expect(s.flash).not.toHaveProperty('repo'); // not remembered (any more)
-    expect(s.flash.baud).toBe(921600);
-    expect(s.flash.verify).toBe(false);
-    expect(s.monitor).toEqual({ baud: 115200, format: '8N1', eol: 0, colorize: false });
-    expect(s.ports).toEqual({ '10c4:ea60': { baud: 74880, format: '7E1', eol: 0 } });
+    const d = defaultDeviceSettings();
+    expect(s.last.flash).toEqual({ ...d.flash, repo: 'a/b', verify: false });
+    expect(s.last.monitor).toEqual({ ...d.monitor, colorize: false });
+    expect(Object.keys(s.devices)).toEqual(['10c4:ea60']);
+    expect(s.devices['10c4:ea60']!.monitor).toMatchObject({ baud: 74880, format: '7E1' });
   });
 
   it('keeps the most recently used devices', () => {
-    const ports = {};
-    for (let i = 0; i < MAX_PORTS + 3; i++) {
-      const key = `303a:${i.toString(16).padStart(4, '0')}`;
-      rememberPort(ports, key, { baud: 115200, format: '8N1', eol: 0 });
+    const devices = {};
+    const d = defaultDeviceSettings();
+    for (let i = 0; i < MAX_DEVICES + 3; i++) {
+      rememberDevice(devices, `303a:${i.toString(16).padStart(4, '0')}`, d);
     }
-    rememberPort(ports, '303a:0005', { baud: 9600, format: '8N1', eol: 0 }); // used again
-    const keys = Object.keys(ports);
-    expect(keys).toHaveLength(MAX_PORTS);
+    rememberDevice(devices, '303a:0005', d); // used again
+    const keys = Object.keys(devices);
+    expect(keys).toHaveLength(MAX_DEVICES);
     expect(keys).not.toContain('303a:0000');
     expect(keys.at(-1)).toBe('303a:0005');
   });
@@ -75,8 +85,7 @@ describe('settings', () => {
       },
     });
     const s = store.load();
-    s.monitor.baud = 9600;
+    s.last.monitor.baud = 9600;
     expect(() => store.save(s)).not.toThrow();
-    expect(STORAGE_KEY).toMatch(/v1$/);
   });
 });
