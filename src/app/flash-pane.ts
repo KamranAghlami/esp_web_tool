@@ -161,7 +161,7 @@ export class FlashPane {
       screen.text(
         r.x + 1,
         r.y,
-        'Ready.  f starts a simulated run (no device writes in M0)',
+        'Ready.  F starts a simulated run (no device writes in M0)',
         { fg: theme.dim },
         r.w - 2,
       );

@@ -317,6 +317,24 @@ test.describe('app', () => {
     await expect.poll(async () => (await screenText(page)).join('\n')).not.toContain('Anywhere');
   });
 
+  test('messages replace the key hints until the next key', async ({ page }) => {
+    await expectOnScreen(page, 'c Connect');
+    await page.keyboard.press('E');
+    await expectOnScreen(page, 'Erase arrives with esptool-js in M1');
+    expect((await screenText(page)).join('\n')).not.toContain('c Connect');
+    await page.keyboard.press('1');
+    await expectOnScreen(page, 'c Connect');
+  });
+
+  test('f toggles fullscreen and F starts a flash', async ({ page }) => {
+    await page.keyboard.press('f');
+    await expect.poll(async () => (await screenText(page)).join()).not.toContain('2 Monitor');
+    await page.keyboard.press('f');
+    await expectOnScreen(page, '2 Monitor');
+    await page.keyboard.press('F');
+    await expectOnScreen(page, 'Flash (simulated)');
+  });
+
   test('help overlay opens and closes', async ({ page }) => {
     await page.keyboard.press('?');
     await expectOnScreen(page, 'Help · Esc to close');

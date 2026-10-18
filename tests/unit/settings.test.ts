@@ -29,7 +29,7 @@ describe('settings', () => {
     store.save(s);
     expect(mem.writes).toBe(0);
     s.monitor.baud = 460800;
-    s.flash.repo = 'espressif/esp-idf';
+    s.flash.verify = false;
     rememberPort(s.ports, '303a:1001', { baud: 230400, format: '8E1', eol: 2 });
     store.save(s);
     expect(mem.writes).toBe(1);
@@ -40,12 +40,12 @@ describe('settings', () => {
     expect(parseSettings('not json')).toEqual(defaultSettings());
     const s = parseSettings(
       JSON.stringify({
-        flash: { source: 'ftp', baud: 123, verify: false },
+        flash: { source: 'github', repo: 'a/b', baud: 123, verify: false },
         monitor: { baud: -5, format: '9X9', eol: 7, colorize: false },
         ports: { 'bad key': { baud: 9600 }, '10c4:ea60': { baud: 74880, format: '7E1' } },
       }),
     );
-    expect(s.flash.source).toBe('files');
+    expect(s.flash).not.toHaveProperty('repo'); // not remembered (any more)
     expect(s.flash.baud).toBe(921600);
     expect(s.flash.verify).toBe(false);
     expect(s.monitor).toEqual({ baud: 115200, format: '8N1', eol: 0, colorize: false });

@@ -25,7 +25,7 @@ import {
   type MenuOptions,
   spinner,
 } from '../tui/widgets';
-import { stringWidth, truncate } from '../tui/width';
+import { stringWidth } from '../tui/width';
 import { BAUD_RATES, FlashPane, formatSize } from './flash-pane';
 import { HELP } from './help';
 import { LINE_ENDINGS, MonitorPane } from './monitor-pane';
@@ -49,7 +49,9 @@ const MONITOR_BAUDS = [9600, 19200, 38400, 57600, 74880, ...BAUD_RATES];
 /** Mouse tracking (button + drag, SGR encoding), bracketed paste, window title. */
 const ENTER_APP = '\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b]0;ESP Web Tool\x07';
 
-type Toast = { text: string; kind: 'info' | 'ok' | 'warn' | 'error'; until: number };
+type MessageKind = 'info' | 'ok' | 'warn' | 'error';
+/** A message shown in the bottom bar in place of the key hints, until it expires or a key. */
+type Message = { text: string; kind: MessageKind; until: number };
 type Overlay =
   | { kind: 'help'; scroll: number }
   | { kind: 'confirm'; title: string; body: string[]; onYes: () => void }
@@ -102,7 +104,8 @@ export class App {
     monitor: null,
   };
   private overlay: Overlay | null = null;
-  private toasts: Toast[] = [];
+  private message: Message | null = null;
+  private messageTimer: ReturnType<typeof setTimeout> | null = null;
 
   private parser = new InputParser();
   private renderer = new Renderer();
@@ -138,8 +141,8 @@ export class App {
     this.monitor.onCopy = (text) => {
       const n = [...text].length;
       this.copy(text).then(
-        () => this.toast(`Copied ${n} character${n === 1 ? '' : 's'}`, 'ok'),
-        (err: unknown) => this.toast(`Copy failed: ${errorText(err)}`, 'error'),
+        () => this.notify(`Copied ${n} character${n === 1 ? '' : 's'}`, 'ok'),
+        (err: unknown) => this.notify(`Copy failed: ${errorText(err)}`, 'error'),
       );
     };
     this.flash.baud.onOpen = () =>
@@ -156,7 +159,7 @@ export class App {
       onData: (bytes) => this.monitor.write(bytes, () => this.invalidate()),
       onState: (s, detail) => this.onPortState(s, detail),
     });
-    this.flash.onSimDone = () => this.toast('Simulated run finished (nothing was written)', 'ok');
+    this.flash.onSimDone = () => this.notify('Simulated run finished (nothing was written)', 'ok');
     this.flash.source.onChange = () => (this.flashFocus = 0);
     this.startDemo = opts.demo ?? 'off';
     this.store = new SettingsStore(opts.storage);
@@ -206,7 +209,11 @@ export class App {
   // Input
 
   private onData(data: string): void {
-    for (const e of this.parser.feed(data)) this.dispatch(e);
+    for (const e of this.parser.feed(data)) {
+      // The next key puts the hints back (a message it causes replaces them again).
+      if (e.type === 'key') this.message = null;
+      this.dispatch(e);
+    }
     this.saveSettings();
     this.invalidate();
   }
@@ -217,9 +224,6 @@ export class App {
   private applySettings(): void {
     const { flash, monitor } = this.settings;
     const f = this.flash;
-    f.source.value = flash.source;
-    f.repo.setValue(flash.repo);
-    f.url.setValue(flash.url);
     f.baud.index = Math.max(0, BAUD_RATES.indexOf(flash.baud as (typeof BAUD_RATES)[number]));
     f.eraseAll.checked = flash.eraseAll;
     f.verify.checked = flash.verify;
@@ -243,9 +247,6 @@ export class App {
     const f = this.flash;
     const s = this.settings;
     s.flash = {
-      source: f.source.value,
-      repo: f.repo.value,
-      url: f.url.value,
       baud: f.baud.value,
       eraseAll: f.eraseAll.checked,
       verify: f.verify.checked,
@@ -307,11 +308,14 @@ export class App {
       case 'c':
         this.toggleConnect();
         return true;
-      case 'f':
+      case 'F':
         this.startFlash();
         return true;
+      case 'f':
+        this.toggleFullscreen();
+        return true;
       case 'E':
-        this.toast('Erase arrives with esptool-js in M1', 'info');
+        this.notify('Erase arrives with esptool-js in M1', 'info');
         return true;
       case 's':
         this.flash.source.cycle();
@@ -322,11 +326,8 @@ export class App {
       case '2':
         this.focusPane('monitor');
         return true;
-      case 'z':
-        this.toggleFullscreen();
-        return true;
       case 'D':
-        this.toast('Dump (read) flash arrives with esptool-js in M1', 'info');
+        this.notify('Dump (read) flash arrives with esptool-js in M1', 'info');
         return true;
       case '?':
         this.overlay = { kind: 'help', scroll: 0 };
@@ -414,7 +415,7 @@ export class App {
       [
         { key: 'r', label: 'Reset chip', action: () => this.resetChip() },
         { key: 'b', label: 'Boot (download) mode', action: () => this.bootMode() },
-        { key: 'c', label: 'Clear', action: () => m.clear() },
+        { key: 'C', label: 'Clear', action: () => m.clear() },
         {
           key: 's',
           label: `Settings: ${p.baudRate} ${p.format} ${m.lineEnding.label} ▸`,
@@ -495,7 +496,7 @@ export class App {
         checked: f === p.format,
         action: () => {
           if (p.state === 'open')
-            void p.setFormat(f).then(() => this.toast(`Format: ${f}`, 'info'));
+            void p.setFormat(f).then(() => this.notify(`Format: ${f}`, 'info'));
           else p.format = f;
         },
       })),
@@ -519,29 +520,29 @@ export class App {
   }
 
   private resetChip(): void {
-    if (this.ports.state !== 'open') return this.toast('Connect a port first (c)', 'warn');
-    void this.ports.reset().then(() => this.toast('Reset sent', 'ok'));
+    if (this.ports.state !== 'open') return this.notify('Connect a port first (c)', 'warn');
+    void this.ports.reset().then(() => this.notify('Reset sent', 'ok'));
   }
 
   private bootMode(): void {
     const ports = this.ports;
-    if (ports.state !== 'open') return this.toast('Connect a port first (c)', 'warn');
+    if (ports.state !== 'open') return this.notify('Connect a port first (c)', 'warn');
     void ports
       .enterBootloader()
       .then(() =>
-        this.toast(`Boot mode sequence sent (${ports.usbJtag ? 'USB-JTAG' : 'DTR/RTS'})`, 'ok'),
+        this.notify(`Boot mode sequence sent (${ports.usbJtag ? 'USB-JTAG' : 'DTR/RTS'})`, 'ok'),
       );
   }
 
   private toggleColors(): void {
     this.monitor.toggleColorize();
-    this.toast(`Log level colors: ${this.monitor.colorize ? 'on' : 'off'}`, 'info');
+    this.notify(`Log level colors: ${this.monitor.colorize ? 'on' : 'off'}`, 'info');
   }
 
   private setMonitorBaud(baud: number): void {
     const ports = this.ports;
     if (ports.state === 'open')
-      void ports.setBaud(baud).then(() => this.toast(`Baud: ${baud}`, 'info'));
+      void ports.setBaud(baud).then(() => this.notify(`Baud: ${baud}`, 'info'));
     else ports.baudRate = baud;
   }
 
@@ -592,7 +593,7 @@ export class App {
 
   private enterLive(): void {
     if (this.ports.state !== 'open') {
-      this.toast(
+      this.notify(
         this.demo !== 'off'
           ? 'Demo stream is output-only; connect a port to type'
           : 'Connect a port first (c)',
@@ -610,11 +611,11 @@ export class App {
   private toggleConnect(): void {
     const ports = this.ports;
     if (ports.state === 'unsupported') {
-      this.toast('Web Serial is not available: use Chrome, Edge or Opera on desktop', 'error');
+      this.notify('Web Serial is not available: use Chrome, Edge or Opera on desktop', 'error');
       return;
     }
     if (ports.port) {
-      void ports.close().then(() => this.toast('Disconnected', 'info'));
+      void ports.close().then(() => this.notify('Disconnected', 'info'));
       return;
     }
     // Called synchronously from the key/mouse handler so the user activation still applies.
@@ -638,7 +639,7 @@ export class App {
           this.monitor.clear();
           this.focusPane('monitor');
           this.saveSettings();
-          this.toast(
+          this.notify(
             `Connected ${describePort(port)} @ ${ports.baudRate} ${ports.format}` +
               (known ? ' (remembered settings)' : ''),
             'ok',
@@ -648,10 +649,10 @@ export class App {
       .catch((err: unknown) => {
         if (err instanceof DOMException && err.name === 'NotFoundError') {
           record.result = 'cancelled';
-          this.toast('No port selected', 'warn');
+          this.notify('No port selected', 'warn');
         } else {
           record.detail = errorText(err);
-          this.toast(`Could not open port: ${record.detail}`, 'error');
+          this.notify(`Could not open port: ${record.detail}`, 'error');
         }
       })
       .finally(() => this.invalidate());
@@ -661,7 +662,7 @@ export class App {
     if (this.flash.running) return;
     const parts = this.flash.parts.items.filter((p) => p.enabled);
     if (parts.length === 0) {
-      this.toast('No parts enabled', 'warn');
+      this.notify('No parts enabled', 'warn');
       return;
     }
     const total = parts.reduce((n, p) => n + p.size, 0);
@@ -688,7 +689,7 @@ export class App {
     if (mode === 'off') return;
     if (this.ports.state === 'open') {
       this.demo = 'off';
-      this.toast('Disconnect the port before starting the demo stream', 'warn');
+      this.notify('Disconnect the port before starting the demo stream', 'warn');
       return;
     }
     if (!this.monitor.pane.bytesIn) this.monitor.write(BOOT_BANNER, this.invalidate);
@@ -700,7 +701,7 @@ export class App {
       if (this.monitor.pane.backlog < 20)
         this.monitor.write(this.demoStream.next(perTick), this.invalidate);
     }, tick);
-    this.toast(
+    this.notify(
       `Demo stream${mode === 'flood' ? ': flood (~2 Mbaud)' : ''}. Connecting a port stops it`,
       'info',
     );
@@ -709,12 +710,19 @@ export class App {
   private onPortState(s: PortState, detail?: string): void {
     this.monitor.active = s === 'open' || this.demo !== 'off';
     if (s !== 'open') this.monitor.live = false;
-    if (detail && s === 'none') this.toast(`Port closed: ${detail}`, 'warn');
+    if (detail && s === 'none') this.notify(`Port closed: ${detail}`, 'warn');
     this.invalidate();
   }
 
-  toast(text: string, kind: Toast['kind'] = 'info'): void {
-    this.toasts = [...this.toasts.slice(-2), { text, kind, until: this.now() + 4000 }];
+  /** Show a message in the bottom bar: warnings and errors for 8 s, the rest for 4 s. */
+  notify(text: string, kind: MessageKind = 'info'): void {
+    const ms = kind === 'warn' || kind === 'error' ? 8000 : 4000;
+    this.message = { text, kind, until: this.now() + ms };
+    if (this.messageTimer) clearTimeout(this.messageTimer);
+    this.messageTimer = setTimeout(() => {
+      this.messageTimer = null;
+      this.invalidate();
+    }, ms + 20);
     this.invalidate();
   }
 
@@ -822,8 +830,9 @@ export class App {
       screen.withClip(monRect, () => this.monitor.render(ctx, monRect!));
     }
 
-    keyBar(ctx, { x: 2, y: H - 2, w: W - 4, h: 1 }, this.hints());
-    this.drawToasts(ctx, main);
+    const bar = { x: 2, y: H - 2, w: W - 4, h: 1 };
+    if (this.message && this.message.until > ctx.now) this.drawMessage(ctx, bar, this.message);
+    else keyBar(ctx, bar, this.hints());
     if (this.overlay) {
       ctx.cursor.visible = false; // no text cursor blinking through a dialog
       this.drawOverlay(ctx);
@@ -921,37 +930,32 @@ export class App {
     const connected = this.ports.port !== null;
     return [
       { key: 'c', label: connected ? 'Disconnect' : 'Connect', action: () => this.toggleConnect() },
-      { key: 'f', label: 'Flash', action: () => this.startFlash() },
+      { key: 'F', label: 'Flash', action: () => this.startFlash() },
       { key: 'E', label: 'Erase' },
       { key: 's', label: 'Source', action: () => this.flash.source.cycle() },
       { key: 'Tab', label: 'Focus' },
       { key: '1/2', label: 'Pane' },
-      { key: 'z', label: 'Fullscreen', action: () => this.toggleFullscreen() },
+      { key: 'f', label: 'Fullscreen', action: () => this.toggleFullscreen() },
       { key: '⏎', label: 'Monitor', action: () => (this.focusPane('monitor'), this.enterLive()) },
       { key: 'D', label: 'Dump' },
       { key: '?', label: 'Help', action: () => (this.overlay = { kind: 'help', scroll: 0 }) },
     ];
   }
 
-  private drawToasts(ctx: Ctx, main: Rect): void {
+  /** `✓ Connected 303a:1001 @ 115200 8N1`: a colored mark, then the text. Click dismisses. */
+  private drawMessage(ctx: Ctx, r: Rect, m: Message): void {
     const { screen, theme } = ctx;
-    const now = ctx.now;
-    this.toasts = this.toasts.filter((t) => t.until > now);
-    if (!this.toasts.length) return;
-    ctx.invalidate();
-    let y = main.y + main.h - 1;
-    for (const t of [...this.toasts].reverse()) {
-      const color = { info: theme.accent, ok: theme.ok, warn: theme.warn, error: theme.error }[
-        t.kind
-      ];
-      const text = ` ${truncate(t.text, main.w - 6)} `;
-      const w = stringWidth(text) + 2;
-      const x = main.x + main.w - w - 1;
-      screen.text(x, y, '▌', { fg: color, bg: theme.inputBg });
-      screen.text(x + 1, y, text, { fg: theme.fg, bg: theme.inputBg });
-      screen.text(x + w - 1, y, ' ', { bg: theme.inputBg });
-      y--;
-    }
+    const [mark, color] = {
+      info: ['•', theme.accent],
+      ok: ['✓', theme.ok],
+      warn: ['!', theme.warn],
+      error: ['✗', theme.error],
+    }[m.kind] as [string, number];
+    screen.text(r.x, r.y, mark, { fg: color, attrs: Attr.Bold });
+    screen.text(r.x + 2, r.y, m.text, { fg: m.kind === 'info' ? theme.fg : color }, r.w - 2);
+    ctx.hits.add(r, (e) => {
+      if (e.action === 'down') this.message = null;
+    });
   }
 
   private drawOverlay(ctx: Ctx): void {

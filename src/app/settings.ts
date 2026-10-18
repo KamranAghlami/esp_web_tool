@@ -1,5 +1,5 @@
 import { FORMATS, type Format } from '../serial/port-manager';
-import { BAUD_RATES, type Source } from './flash-pane';
+import { BAUD_RATES } from './flash-pane';
 import { LINE_ENDINGS } from './monitor-pane';
 
 /**
@@ -9,9 +9,6 @@ import { LINE_ENDINGS } from './monitor-pane';
  */
 export interface Settings {
   flash: {
-    source: Source;
-    repo: string;
-    url: string;
     baud: number;
     eraseAll: boolean;
     verify: boolean;
@@ -42,9 +39,6 @@ export const MAX_PORTS = 32;
 export function defaultSettings(): Settings {
   return {
     flash: {
-      source: 'files',
-      repo: '',
-      url: '',
       baud: 921600,
       eraseAll: false,
       verify: true,
@@ -58,7 +52,6 @@ export function defaultSettings(): Settings {
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => typeof v === 'object' && v !== null && !Array.isArray(v);
 const bool = (v: unknown, d: boolean) => (typeof v === 'boolean' ? v : d);
-const str = (v: unknown, d: string) => (typeof v === 'string' ? v.slice(0, 2000) : d);
 const oneOf = <T>(v: unknown, list: readonly T[], d: T): T =>
   list.includes(v as T) ? (v as T) : d;
 const baud = (v: unknown, d: number) =>
@@ -97,9 +90,6 @@ export function parseSettings(json: string | null): Settings {
   }
   return {
     flash: {
-      source: oneOf(f.source, ['files', 'github', 'url'] as const, d.flash.source),
-      repo: str(f.repo, d.flash.repo),
-      url: str(f.url, d.flash.url),
       baud: oneOf(f.baud, BAUD_RATES as readonly number[], d.flash.baud),
       eraseAll: bool(f.eraseAll, d.flash.eraseAll),
       verify: bool(f.verify, d.flash.verify),

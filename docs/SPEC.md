@@ -81,8 +81,8 @@ Target feel: **running a CLI tool through ttyd**. The page is one full-window xt
 - **Rendering**: immediate mode. On each state change (batched per animation frame), widgets draw into a `Screen` cell grid (char, fg, bg, attrs, width). That grid is diffed against the previous frame, and only changed runs are emitted (cursor moves + SGR). Uses the alternate screen and a hidden cursor, except when editing text.
 - **Input**: one parser for xterm's `onData` stream: CSI/SS3 keys, Alt as an ESC prefix, bracketed paste (`?2004`), SGR mouse (`?1000;1006`: click, wheel, drag). Keys and mouse reach the app as a terminal app would get them, which is what makes it feel real.
 - **Layout**: nested horizontal/vertical splits with fixed/flex sizes, recomputed on resize. Three size classes: **wide** (≥ 120 cols, split panes), **normal** (≥ 80×24, one pane at a time) and **compact** (≥ 40×14, phones; §4.1). Only below 40×14 show a "terminal too small" notice, as real TUIs do. M0 still has the old 80×24 minimum, which is why an iPhone 14 Pro (about 48 cols in portrait) shows the notice.
-- **Widgets** (`src/tui/`): Box (title in border), Text, List, Table, TextInput, Select (popup list), Checkbox/Radio, ProgressBar, Dialog/Confirm, Toast, StatusBar, KeyBar, ScrollView, TermPane (the headless blit).
-- **Monitor pane = a terminal inside the terminal.** Device bytes go into an `@xterm/headless` instance sized to the pane. That instance parses ANSI, cursor moves and clears just like a real terminal. Each frame we copy its visible buffer cells (`IBufferCell` gives char, colors, attributes) into the pane region. **Fullscreen** (`z`) makes the focused pane fill the window. We still blit rather than pass bytes straight through, so the key bar and status line stay.
+- **Widgets** (`src/tui/`): Box (title in border), Text, List, Table, TextInput, Select (popup list), Checkbox/Radio, ProgressBar, Dialog/Confirm, StatusBar, KeyBar (which also shows messages), ScrollView, TermPane (the headless blit).
+- **Monitor pane = a terminal inside the terminal.** Device bytes go into an `@xterm/headless` instance sized to the pane. That instance parses ANSI, cursor moves and clears just like a real terminal. Each frame we copy its visible buffer cells (`IBufferCell` gives char, colors, attributes) into the pane region. **Fullscreen** (`f`) makes the focused pane fill the window. We still blit rather than pass bytes straight through, so the key bar and status line stay.
 - **Width**: use the `unicode11` addon, and use the same width table in `Screen`, so our layout and xterm agree. The UI's own strings use no emoji or ambiguous-width glyphs. Box drawing, block elements and `●▶✓✗` are fine.
 - **Look**: page background = terminal background, no margins, terminal-style window title (we write OSC 0/2 and mirror it to `document.title`). Font: self-hosted monospace with full box-drawing coverage (JetBrains Mono or Iosevka). xterm's `customGlyphs` draws box and block characters pixel-perfect.
 - **Text selection**: as in terminals: with mouse reporting on, **Shift+drag** selects. `Ctrl+Shift+C` / `Ctrl+Shift+V` copy and paste.
@@ -154,7 +154,7 @@ interface FlashPlan {
 │ Baud [921600▾] Erase all [ ] Verify [x] Reset after [x]                                       │
 │ my-fw.bin   ███████████████▌               52%  612 KiB/s                                     │
 ├─────────────────────────────────────────────────┴──────────────────────────────────────────────┤
-│ c Connect  f Flash  E Erase  1/2 Pane  z Fullscreen  ^A Monitor menu  ^] Leave monitor  ? Help  │
+│ c Connect  F Flash  E Erase  1/2 Pane  f Fullscreen  ^A Monitor menu  ^] Leave monitor  ? Help  │
 └────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -201,17 +201,21 @@ A browser tab is a hostile terminal. Chrome **does not let pages intercept** `Ct
 | `Tab` / `Shift+Tab` | Cycle focus between widgets; `1` / `2` jump to the Flash / Monitor pane |
 | Arrows, `j`/`k`, `PgUp`/`PgDn`, `g`/`G` | Move in lists and tables; `Enter` selects; `Space` toggles |
 | `c` | Connect / disconnect port |
-| `f` | Start flash (confirm dialog with the plan summary) |
+| `F` | Start flash (confirm dialog with the plan summary) |
 | `E` | Erase entire flash (confirm) |
 | `s` | Cycle source: Files / GitHub / URL |
 | `a` / `d` / `e` / `o` | Parts table: add file / delete row / edit offset / open folder (TUI file browser) |
 | `Enter` on the Monitor pane | Enter the monitor: **from here every key goes to the device** |
 | `Ctrl+]` | Leave the monitor (back to hotkeys) |
-| `Ctrl+A` | Monitor menu: a centered pop-up that lists its keys and is clickable (live, or with the Monitor pane focused). `r` reset, `b` boot mode, `c` clear, `s` settings ▸ (`b` baud ▸, `f` format 8N1/8E1/7E1… ▸, `e` line ending ▸), `h` log-level colors, `f` fullscreen, `Ctrl+A` send a literal `Ctrl+A`, `?` help; later: `d` DTR, `t` timestamps, `l` save log. Menus open centered on the pane they belong to. Submenus have a `‹ Back` row; Esc and Backspace go back. Current values show in the menu labels and the status line (`303a:1001 @ 115200 8N1`), not in the pane header. |
-| `z` | Fullscreen the focused pane; again to restore |
+| `Ctrl+A` | Monitor menu: a centered pop-up that lists its keys and is clickable (live, or with the Monitor pane focused). `r` reset, `b` boot mode, `C` clear, `s` settings ▸ (`b` baud ▸, `f` format 8N1/8E1/7E1… ▸, `e` line ending ▸), `h` log-level colors, `f` fullscreen, `Ctrl+A` send a literal `Ctrl+A`, `?` help; later: `d` DTR, `t` timestamps, `l` save log. Menus open centered on the pane they belong to. Submenus have a `‹ Back` row; Esc and Backspace go back. Current values show in the menu labels and the status line (`303a:1001 @ 115200 8N1`), not in the pane header. |
+| `f` | Fullscreen the focused pane; again to restore |
 | `D` | Dump (read) flash to a file: whole chip or a range (M1). The demo log stream moved to `?demo` (§10) |
 | `?` | Help overlay listing all keys |
 | `Esc` | Close dialog or overlay, cancel the current input |
+
+**Capital letters mark actions that cannot be undone**: `F` flash, `E` erase, `Ctrl+A C` clear the scrollback. Lowercase keys are safe to press by accident. `D` (dump) is capital only because `d` deletes a part row.
+
+**Messages** (connected, copied, errors…) appear in the bottom bar in place of the key hints. They show a colored mark: `✓` ok, `•` info, `!` warning, `✗` error. The next key press or a click on the bar brings the hints back; otherwise info goes after 4 s and warnings after 8 s. Messages never float over the panes.
 
 Every action can also be done with the mouse:
 - Click to focus or select. The wheel scrolls lists, the monitor and the help.
@@ -413,8 +417,8 @@ Query parameters (they can be combined):
 The tool never starts flashing from a link alone; the user always confirms.
 
 Settings live in `localStorage`, so every browser (each computer or phone) keeps its own. Best effort: blocked or full storage just means nothing sticks. They are saved after each input that changes them (`src/app/settings.ts`, key `esp-web-tool:settings:v1`). Every field is validated on load and falls back to its default.
-- **Now**: flash source, repo and manifest URL fields, flash baud, Erase all / Verify / Reset after, monitor baud / format / line ending, log-level colors.
-- **Per USB device**: baud, format and line ending are also remembered per `vid:pid` (the 32 most recent devices). They are applied when that device is connected again, and the toast says "remembered settings". Web Serial exposes no serial number, so two boards with the same USB ids (e.g. two native-USB ESP32-C5s, both `303a:1001`) share one entry.
+- **Now**: flash baud, Erase all / Verify / Reset after, monitor baud / format / line ending, log-level colors. The flash source and the repo/manifest URL fields are deliberately *not* remembered: each visit starts on Files, and links prefill them (`?repo=`, `?manifest=`).
+- **Per USB device**: baud, format and line ending are also remembered per `vid:pid` (the 32 most recent devices). They are applied when that device is connected again, and the message says "remembered settings". Web Serial exposes no serial number, so two boards with the same USB ids (e.g. two native-USB ESP32-C5s, both `303a:1001`) share one entry.
 - **Later**: theme, auto-monitor, timestamps, asset proxy URL, recent repos (last 10).
 - URL parameters override remembered settings for that visit.
 
@@ -485,6 +489,10 @@ Settings live in `localStorage`, so every browser (each computer or phone) keeps
   - Baud, format and line ending moved under Ctrl+A `s` Settings, and `f` is Fullscreen in that menu.
   - `D` is reserved for dumping flash; the demo stream is now URL-only.
   - Double/triple click selects a word/line in the monitor. xterm's right-click word selection (macOS default) treated borders as part of words and is now off.
+- **Sixth pass (2026-10-18)**:
+  - The flash source and repo/URL fields are no longer remembered.
+  - Toasts became bottom-bar messages.
+  - `f` is Fullscreen everywhere, `F` is Flash (capitals = cannot be undone), and Ctrl+A `C` clears.
 
 ## 15. Open questions
 
