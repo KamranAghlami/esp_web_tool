@@ -12,6 +12,7 @@ export const HELP: [string, string?][] = [
   ['Esc', 'while the flasher runs: stop it (asks)'],
   ['?', 'this help'],
   ['- / +', 'smaller / larger font (remembered)'],
+  ['s', 'settings: theme (auto, light, dark), font, screen reader'],
   [''],
   ['Lists and fields'],
   ['↑ ↓  j k', 'move; PgUp/PgDn, g/G jump'],

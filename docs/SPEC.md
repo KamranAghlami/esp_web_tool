@@ -197,7 +197,7 @@ Feedback from M0: on an iPhone 14 Pro the app shows "terminal too small". Phones
 - **WebUSB fallback** (`src/browser/usb-serial.ts`) when there is no Web Serial: CDC-ACM devices through `web-serial-polyfill` (native-USB ESP32s, CH9102/CH343), and **CH340 through esptool-js's `WebUSBSerialPort`**, which the 2026-10-17 check didn't know about. CP210x and FTDI are refused with a message saying why. Without either API (iPhone, iPad): `✗ no Web Serial or WebUSB here`, and `?demo` still works.
 - Tested at the Pixel 7 size in Playwright (`tests/e2e/phone.spec.ts`): the compact layout, tapping tabs and key-bar entries (a tap is a user gesture, so `requestPort` works), the extra keys, the stacked help.
 
-**Installable (later)**: a web app manifest + service worker lets the app be "installed" so it opens full screen without the URL bar, which suits the terminal feel and also gives offline use (Goal 1).
+**Installable** (M5, done): a web app manifest (`public/manifest.webmanifest`, icons) and a service worker let the app be installed, so it opens full screen without the URL bar. The service worker (generated at build time by a Vite plugin, `vite.config.ts`) precaches every file of the build, so the app opens offline after one visit (Goal 1). Pages are network-first, so a new deploy shows up at once; files are cache-first, because their names are hashed. Only same-origin GETs go through it. It is blocked in e2e tests except `pwa.spec.ts`, because Playwright's request routing doesn't see requests a service worker makes.
 
 ### Keyboard
 A browser tab is a hostile terminal. Chrome **does not let pages intercept** `Ctrl+T`, `Ctrl+W`, `Ctrl+N`, `Ctrl+Tab` or `Ctrl+Shift+T/W/N`. `Alt+digit` and `Ctrl+digit` switch browser tabs, and F5/F11/F12 are unreliable. So we use the lazygit/htop model: **single-key hotkeys** whenever no text input or monitor has focus, plus a **prefix key** inside the monitor. The prefix is `Ctrl+A`, as in picocom/minicom/screen; `idf.py monitor`'s `Ctrl+T` cannot be caught in a browser.
@@ -221,6 +221,7 @@ A browser tab is a hostile terminal. Chrome **does not let pages intercept** `Ct
 | `Esc` while a job runs | Stop it, after a confirmation (a flash stopped halfway may not boot) |
 | `?` | Help overlay listing all keys |
 | `-` / `+` | Smaller / larger font, remembered per browser |
+| `s` | Settings of the page: theme (auto/light/dark), font size, screen reader mode |
 | `Esc` | Close dialog or overlay, cancel the current input |
 
 **Capital letters mark actions that cannot be undone**: `F` flash, `E` erase, `Ctrl+A C` clear the scrollback. Lowercase keys are safe to press by accident. `D` (dump) is capital only because `d` deletes a part row.
@@ -235,7 +236,8 @@ Every action can also be done with the mouse:
 - **Selection**: dragging in the monitor selects text tmux-style. The selection is anchored to the buffer (an xterm marker), so it stays on the same text while output streams in. Dragging past the edge scrolls. It is copied to the clipboard on release, through the Clipboard API with an `execCommand('copy')` fallback. Double click selects a word (a run of non-blank buffer cells) and triple click the line; both copy at once. They work on the monitor's own buffer, so pane borders never join a word. xterm's right-click word selection (on by default on macOS) is turned off for that reason. Shift-drag (Option-drag on macOS) is xterm's own screen selection, for anything else on screen.
 
 ### Visual style
-- Colors are **terminal palette entries** (16 ANSI + a few truecolor accents), defined as an xterm `ITheme`. The default dark theme is a low-saturation background with green/amber/cyan accents. A light theme follows `prefers-color-scheme`.
+- Colors are **terminal palette entries** (16 ANSI + a few truecolor accents), defined as an xterm `ITheme`. The default dark theme is a low-saturation background with green/amber/cyan accents. A light theme (GitHub's light palette, `src/tui/theme.ts`) follows `prefers-color-scheme`; `s` Settings → Theme sets auto, light or dark, remembered per browser.
+- **Accessibility** (M5): `s` → Screen reader mode turns on xterm's `screenReaderMode` (the screen is mirrored into an accessible live region), remembered. With `prefers-reduced-motion`, the cursor doesn't blink and spinners stand still (`…`).
 - Progress bars use eighth-block characters (`▏▎▍▌▋▊▉█`) so they move smoothly; spinners use braille (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`).
 - No quit key and no fake shell: closing the tab is how you leave (dropped after M0 testing; it added nothing).
 
@@ -464,7 +466,8 @@ Settings live in `localStorage`, so every browser (each computer or phone) keeps
 - **Per USB device**: a full copy of all of the above is also kept per `vid:pid` (the 32 most recent devices). It is restored when that device is connected again (its flash plan too, or else its remembered manifest is loaded again), so each board keeps its own plan and monitor setup, and the message says "(settings restored)". A device seen for the first time keeps the current setup. Web Serial exposes no serial number, so two boards with the same USB ids (e.g. two native-USB ESP32-C5s, both `303a:1001`) share one entry.
 - **The flash plan, files included** (decided 2026-10-18), last used and per device like the rest. It lives in IndexedDB (`src/browser/plan-store.ts`, database `esp-web-tool`, store `plans`, keys `last` and `vid:pid`), because only IndexedDB can keep file and folder handles. It holds the Manifest field, the parsed manifest, release list and selection, set, status, and every row as edited (offset, on/off, path or file handle, lock). Part data is not stored; it is read again. Input saves at once; async changes (reads finishing) about 300 ms later.
 - **Permission after a reload**: Chrome keeps the handles but not the right to read them, unless the user chose "Allow on every visit". Rows needing it are red ("needs permission again (o)"), and a notice above the table says so. `o` (or a click on the notice) asks for all of them in one gesture (`requestPermission`). A page can't prompt without a gesture, so it doesn't ask on load. Files picked through the `<input type=file>` fallback have no handle and come back red ("not kept after reload: pick it again").
-- **Later**: theme, auto-monitor, timestamps, asset proxy URL, recent repos (last 10).
+- **Per browser** too: font size, theme, screen reader mode.
+- **Later**: asset proxy URL, recent repos (last 10).
 - URL parameters override remembered settings for that visit.
 
 ## 11. Privacy and security
@@ -504,7 +507,7 @@ Settings live in `localStorage`, so every browser (each computer or phone) keeps
 | M2b ✅ | **Phones**: compact size class, touch bridge, extra-keys bar, soft-keyboard handling, WebUSB + `web-serial-polyfill` fallback (plus CH340), Android device emulation in e2e. **Needs a real phone** | Flash + monitor a native-USB ESP32 from an Android phone over OTG |
 | M3 | GitHub release files through the asset proxy (once the rate limit is settled; **not started**). Done 2026-10-19: manual assist (download links, drop or pick, matched by name), drag and drop, release notes, ● and Load more in the release list, `&tag/&set/&baud/&monitor` deep links | A real release with `esp-web-tool.json` flashes via manual assist |
 | M4 | Proxy hardening (caching, limits) and self-hosting docs (**wait for the proxy**). Done 2026-10-19: the JSON Schema (`public/schema/v1.json`, served at `/schema/v1.json`), the producer guide with a release workflow and the Pages-mirror option ([docs/producer.md](producer.md)), and `tools/flasher-args-to-manifest.mjs` (flasher_args.json → esp-web-tool.json with sha256 and locks) | One-click flash from a release link |
-| M5 | Polish: light theme, log save, error hints, accessibility pass, installable app (PWA) | — |
+| M5 ✅ | Polish: light theme, log save (M2), error hints (M1), accessibility (screen reader mode, reduced motion), installable app with offline use (PWA) | — |
 
 ### M0 findings (2026-10-17)
 
@@ -547,6 +550,12 @@ Settings live in `localStorage`, so every browser (each computer or phone) keeps
   - The active pane and fullscreen are remembered.
   - The message says "(settings restored)".
   - Focus starts on the parts table, and Enter in the Manifest field moves focus there.
+- **Milestones run (2026-10-19)**, from "finish milestones, except for those needing the proxy; we'll refine stuff later": M1, M2, M2b, the non-proxy parts of M3 and M4, and M5, each tested against the simulated chip (§13) and in emulation, none yet on hardware. Found on the way:
+  - esptool-js 0.7's `HardReset` only lowers RTS without raising it first, so we reset with our own sequence after reopening the monitor.
+  - esptool-js 0.7 has a WebUSB driver for CH340, so CH340 boards can work on phones without Web Serial.
+  - The simulated chip first latched the boot strap with a 300 ms window. A slow machine stretched esptool's 100 ms sleeps past it, so the strap is now latched without timing.
+  - A service worker's cache needs `ignoreVary`: module scripts send an Origin header that the precache requests don't.
+  - This dev VM sometimes sits at load 10–15 from outside processes, and local e2e runs then time out; GitHub's runners are the reference.
 - **Ninth pass (2026-10-18)**:
   - Shorter Manifest placeholder; the help's key column sizes to its longest key (no clipped rows).
   - Shorter errors: one manifest name is tried, and a fetch that fails is "unreachable or no CORS".

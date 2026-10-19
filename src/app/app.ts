@@ -15,7 +15,7 @@ import { centered, cols, rows } from '../tui/layout';
 import { Renderer, type CursorState } from '../tui/renderer';
 import { contains, Screen, type Rect } from '../tui/screen';
 import { Attr, type Style } from '../tui/style';
-import { darkTheme, type Theme } from '../tui/theme';
+import { darkTheme, lightTheme, type Theme } from '../tui/theme';
 import {
   dialog,
   type Focusable,
@@ -126,6 +126,16 @@ export interface AppOptions {
   keyboard?: (show: boolean) => void;
   /** The terminal's font size, changed with `-` / `+` and remembered per browser. */
   fontSize?: { get(): number; set(px: number): void };
+  /**
+   * The page's look (SPEC §4, M5): whether the system prefers light, and applying a theme
+   * or screen reader mode to the page terminal.
+   */
+  look?: {
+    prefersLight(): boolean;
+    onSchemeChange(fn: () => void): void;
+    apply(theme: Theme): void;
+    screenReader(on: boolean): void;
+  };
   /** Deep-link extras (SPEC §10): preselect a set, override the flash and monitor baud. */
   link?: { set?: string; baud?: number; monitor?: number };
   /** File pickers, folder access and fetch for the flash plan (`src/browser/files.ts`). */
@@ -143,7 +153,7 @@ export interface AppOptions {
 
 export class App {
   readonly tty: Tty;
-  readonly theme: Theme;
+  theme: Theme;
   readonly flash: FlashPane;
   readonly monitor = new MonitorPane();
   readonly ports: PortManager;
@@ -185,6 +195,9 @@ export class App {
   private touch: boolean;
   private keyboard?: (show: boolean) => void;
   private fontSize?: AppOptions['fontSize'];
+  private look?: AppOptions['look'];
+  /** The theme was given by the caller (tests): settings don't change it. */
+  private fixedTheme: boolean;
   /** Whether the soft keyboard was last asked to show (touch devices only). */
   private keyboardShown = false;
   private wantedText = false;
@@ -207,6 +220,8 @@ export class App {
   constructor(opts: AppOptions) {
     this.tty = opts.tty;
     this.theme = opts.theme ?? darkTheme;
+    this.fixedTheme = opts.theme !== undefined;
+    this.look = opts.look;
     this.now = opts.now ?? (() => performance.now());
     this.schedule = opts.schedule ?? ((fn) => requestAnimationFrame(fn));
     this.openUrl = opts.openUrl ?? (() => {});
@@ -313,6 +328,9 @@ export class App {
     this.pane = this.settings.ui.pane;
     this.zoomed = this.settings.ui.fullscreen;
     if (this.settings.ui.fontSize && this.fontSize) this.fontSize.set(this.settings.ui.fontSize);
+    this.applyLook();
+    this.look?.onSchemeChange(() => this.applyLook());
+    if (this.settings.ui.screenReader) this.look?.screenReader(true);
     const link = opts.link;
     if (link?.baud) {
       const i = BAUD_RATES.indexOf(link.baud as (typeof BAUD_RATES)[number]);
@@ -480,11 +498,7 @@ export class App {
   private saveSettings(): void {
     const s = this.settings;
     s.last = this.snapshot();
-    s.ui = {
-      pane: this.pane,
-      fullscreen: this.zoomed,
-      fontSize: this.settings.ui.fontSize,
-    };
+    s.ui = { ...s.ui, pane: this.pane, fullscreen: this.zoomed };
     const key = this.ports.port && portKey(this.ports.port);
     if (key && this.ports.state === 'open') rememberDevice(s.devices, key, s.last);
     this.store.save(s);
@@ -580,6 +594,9 @@ export class App {
         return true;
       case 'm':
         this.openDownloads();
+        return true;
+      case 's':
+        this.openAppSettings();
         return true;
       case 'n':
         this.openNotes();
@@ -1069,6 +1086,83 @@ export class App {
         }
       })
       .finally(() => this.invalidate());
+  }
+
+  /** Light or dark, from the setting (auto follows the system). */
+  private applyLook(): void {
+    if (this.fixedTheme) return;
+    const mode = this.settings.ui.theme;
+    const light = mode === 'light' || (mode === 'auto' && (this.look?.prefersLight() ?? false));
+    const theme = light ? lightTheme : darkTheme;
+    if (theme === this.theme) return;
+    this.theme = theme;
+    this.look?.apply(theme);
+    this.renderer.invalidate();
+    this.invalidate();
+  }
+
+  /** `s`: settings of the page itself (the monitor's serial settings are under Ctrl+A s). */
+  private openAppSettings(from?: string): void {
+    const ui = this.settings.ui;
+    this.openMenu(
+      'Settings',
+      [
+        { key: 't', label: `Theme: ${ui.theme} ▸`, action: () => this.openThemeMenu() },
+        {
+          key: '-',
+          label: `Font smaller (${this.fontSize?.get() ?? '?'}px)`,
+          action: () => {
+            this.changeFont(-1);
+            this.openAppSettings('-');
+          },
+        },
+        {
+          key: '+',
+          label: 'Font larger',
+          action: () => {
+            this.changeFont(1);
+            this.openAppSettings('+');
+          },
+        },
+        {
+          key: 'r',
+          label: 'Screen reader mode',
+          checked: ui.screenReader,
+          action: () => {
+            // settings.ui is replaced on every save; change the current one.
+            const on = !this.settings.ui.screenReader;
+            this.settings.ui.screenReader = on;
+            this.look?.screenReader(on);
+            this.saveSettings();
+            this.notify(`Screen reader mode ${on ? 'on' : 'off'}`, 'info');
+          },
+        },
+      ],
+      {},
+      from ?? 't',
+    );
+  }
+
+  private openThemeMenu(): void {
+    const ui = this.settings.ui;
+    const modes = [
+      ['auto', 'Auto: follow the system'],
+      ['light', 'Light'],
+      ['dark', 'Dark'],
+    ] as const;
+    this.openMenu(
+      'Theme',
+      modes.map(([mode, label]) => ({
+        label,
+        checked: ui.theme === mode,
+        action: () => {
+          this.settings.ui.theme = mode;
+          this.applyLook();
+          this.saveSettings();
+        },
+      })),
+      { onBack: () => this.openAppSettings('t') },
+    );
   }
 
   /** `n`: the selected release's notes, as plain text. */

@@ -21,6 +21,10 @@ export interface UiSettings {
   fullscreen: boolean;
   /** Terminal font size in px; null: the default for the device (13 on phones, else 14). */
   fontSize: number | null;
+  /** `auto` follows the system's light/dark setting. */
+  theme: 'auto' | 'light' | 'dark';
+  /** xterm's screen reader mode: the screen is mirrored into an accessible live region. */
+  screenReader: boolean;
 }
 
 export interface DeviceSettings {
@@ -90,7 +94,7 @@ export function defaultDeviceSettings(): DeviceSettings {
 export function defaultSettings(): Settings {
   return {
     last: defaultDeviceSettings(),
-    ui: { pane: 'flash', fullscreen: false, fontSize: null },
+    ui: { pane: 'flash', fullscreen: false, fontSize: null, theme: 'auto', screenReader: false },
     devices: {},
   };
 }
@@ -155,6 +159,8 @@ export function parseSettings(json: string | null): Settings {
         typeof ui.fontSize === 'number' && ui.fontSize >= 8 && ui.fontSize <= 28
           ? ui.fontSize
           : null,
+      theme: oneOf(ui.theme, ['auto', 'light', 'dark'] as const, 'auto'),
+      screenReader: bool(ui.screenReader, false),
     },
     devices,
   };

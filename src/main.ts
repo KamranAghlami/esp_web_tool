@@ -14,7 +14,8 @@ import { attachDrop } from './browser/drop';
 import { indexedDbStore } from './browser/plan-store';
 import { attachTouch, isTouchDevice } from './browser/touch';
 import { UsbSerial } from './browser/usb-serial';
-import { darkTheme } from './tui/theme';
+import { darkTheme, type Theme } from './tui/theme';
+import { setReducedMotion } from './tui/widgets';
 import { XtermTty } from './tty/xterm-tty';
 
 const FONT = '"JetBrains Mono", ui-monospace, monospace';
@@ -113,6 +114,8 @@ async function main(): Promise<void> {
   ]).catch(() => {});
 
   const touch = touchFromUrl();
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  setReducedMotion(reduceMotion);
   // Phones get 13px, so portrait still has about 48 columns (SPEC §4.1).
   const phone = touch && Math.min(screen.width, screen.height) < 600;
   const term = new Terminal({
@@ -121,7 +124,7 @@ async function main(): Promise<void> {
     lineHeight: 1,
     theme: darkTheme.xterm,
     allowProposedApi: true,
-    cursorBlink: true,
+    cursorBlink: !reduceMotion,
     cursorStyle: 'bar',
     scrollback: 0,
     customGlyphs: true,
@@ -194,6 +197,7 @@ async function main(): Promise<void> {
   document.fonts.addEventListener('loadingdone', refit);
   refit();
 
+  const scheme = matchMedia('(prefers-color-scheme: light)');
   const app = new App({
     tty: new XtermTty(term),
     openUrl: (url) => window.open(url, '_blank', 'noopener'),
@@ -209,6 +213,18 @@ async function main(): Promise<void> {
     touch,
     // The soft keyboard is xterm's textarea having focus.
     keyboard: (show) => (show ? term.focus() : term.textarea?.blur()),
+    look: {
+      prefersLight: () => scheme.matches,
+      onSchemeChange: (fn) => scheme.addEventListener('change', fn),
+      apply: (theme: Theme) => {
+        term.options.theme = theme.xterm;
+        document.body.style.background = theme.xterm.background ?? '';
+        document
+          .querySelector('meta[name="theme-color"]')
+          ?.setAttribute('content', theme.xterm.background ?? '');
+      },
+      screenReader: (on) => (term.options.screenReaderMode = on),
+    },
     fontSize: {
       get: () => term.options.fontSize ?? 14,
       set: (px) => {
@@ -226,6 +242,10 @@ async function main(): Promise<void> {
   app.start();
   // On a phone, focusing would pop the keyboard up; the app asks for it when needed.
   if (!touch) term.focus();
+
+  // Installable and usable offline (SPEC §1, §4.1): the service worker keeps the app's files.
+  if (import.meta.env.PROD && 'serviceWorker' in navigator)
+    void navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`).catch(() => {});
 
   // Handle for e2e tests and debugging in the console.
   Object.assign(window, { __espwt: { app, term } });

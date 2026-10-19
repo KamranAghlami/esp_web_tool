@@ -61,7 +61,15 @@ export function progressBar(
 
 const SPINNER = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
 
+let stillSpinners = false;
+
+/** `prefers-reduced-motion`: spinners stand still (SPEC §4, accessibility). */
+export function setReducedMotion(on: boolean): void {
+  stillSpinners = on;
+}
+
 export function spinner(ctx: Ctx): string {
+  if (stillSpinners) return '…';
   ctx.invalidate();
   return SPINNER[Math.floor(ctx.now / 80) % SPINNER.length]!;
 }
