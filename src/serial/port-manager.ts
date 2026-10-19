@@ -60,6 +60,9 @@ export class PortManager {
   state: PortState = serialSupported() ? 'none' : 'unsupported';
   /** Bytes written to the device so far (for the tx rate). */
   bytesOut = 0;
+  /** The control lines as last set (Ctrl+A d toggles them by hand). */
+  dtr = false;
+  rts = false;
   private reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
   private readLoop: Promise<void> | null = null;
   private encoder = new TextEncoder();
@@ -284,8 +287,15 @@ export class PortManager {
     await this.signals(false, false);
   }
 
+  /** Set both lines by hand (DTR: IO0 low on auto-reset boards; RTS: EN low, held in reset). */
+  async setLines(dtr: boolean, rts: boolean): Promise<void> {
+    if (this.port && this.state === 'open') await this.signals(dtr, rts);
+  }
+
   /** Set both lines in one request, so USB adapters see a single control-line change. */
   private signals(dtr: boolean, rts: boolean): Promise<void> {
+    this.dtr = dtr;
+    this.rts = rts;
     return this.port!.setSignals({ dataTerminalReady: dtr, requestToSend: rts });
   }
 }

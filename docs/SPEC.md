@@ -205,7 +205,7 @@ A browser tab is a hostile terminal. Chrome **does not let pages intercept** `Ct
 | `a` / `e` / `d` / `o` | Parts table: add a part / edit the row's offset and file in the part dialog (also `Enter`) / delete row / allow reading local files (the manifest's folder, or again after a reload). `Space` toggles a row |
 | `Enter` on the Monitor pane | Enter the monitor: **from here every key goes to the device** |
 | `Ctrl+]` | Leave the monitor (back to hotkeys) |
-| `Ctrl+A` | Monitor menu: a centered pop-up that lists its keys and is clickable (live, or with the Monitor pane focused). `r` reset, `b` boot mode, `C` clear, `s` settings ▸ (`b` baud ▸, `f` format 8N1/8E1/7E1… ▸, `e` line ending ▸), `h` log-level colors, `f` fullscreen, `Ctrl+A` send a literal `Ctrl+A`, `?` help; later: `d` DTR, `t` timestamps, `l` save log. Menus open centered on the pane they belong to. Submenus have a `‹ Back` row; Esc and Backspace go back. Current values show in the menu labels and the status line (`303a:1001 @ 115200 8N1`), not in the pane header. |
+| `Ctrl+A` | Monitor menu: a centered pop-up that lists its keys and is clickable (live, or with the Monitor pane focused). `r` reset, `b` boot mode, `C` clear, `s` settings ▸ (`b` baud ▸ with Custom…, `f` format 8N1/8E1/7E1… ▸, `e` line ending ▸, `i` input raw/line ▸), `h` log-level colors, `t` timestamps, `d` lines ▸ (DTR, RTS by hand), `l` save log ▸ (plain, or with ANSI colors), `f` fullscreen, `Ctrl+A` send a literal `Ctrl+A`, `?` help. Menus open centered on the pane they belong to. Submenus have a `‹ Back` row; Esc and Backspace go back. Current values show in the menu labels and the status line (`303a:1001 @ 115200 8N1`), not in the pane header. |
 | `f` | Fullscreen the focused pane; again to restore |
 | `D` | Dump (read) flash to a file: a dialog takes the offset and size (empty size: to the end of the flash). The file is named `esp32-s3-<mac>-0x000000-0x400000.bin`. The demo log stream moved to `?demo` (§10) |
 | `Esc` while a job runs | Stop it, after a confirmation (a flash stopped halfway may not boot) |
@@ -396,18 +396,18 @@ So a generic "any public repo" flasher needs a proxy. For a firmware repo that c
 - The status line shows the rx and tx rates while a port is open or the demo runs.
 - Device output is parsed by the pane's `@xterm/headless` instance (§3) and drawn inside the TUI, so ANSI colors, cursor moves and clears (ESP-IDF log colors, `menuconfig`-style output, REPLs) behave as they do in a real terminal.
 - **Log-level colors** (on by default, `Ctrl+A h` toggles): plain ESP-IDF lines starting `E (`, `W (` or `I (` are colored red, yellow or green, as `idf.py monitor` does. Firmware built without `CONFIG_LOG_COLORS` (the default in recent ESP-IDF) sends no escape codes of its own. Lines that already start with an escape code pass through untouched. The colorizer works on raw bytes before the terminal parser and holds at most a 3-byte line prefix, released after 30 ms if the device goes quiet (`src/monitor/log-color.ts`).
-- **Input modes**: *raw* (default; each keystroke is sent, which suits REPLs like MicroPython) or *line* (a local edit line, sent on Enter).
+- **Input modes**: *raw* (default; each keystroke is sent, which suits REPLs like MicroPython) or *line* (a local edit line, sent on Enter). In line mode the monitor's bottom row is the input line (`› [text]`) while live; paste goes into it.
 - Line ending on send: `LF` / `CR` / `CRLF` / none.
-- Baud presets from 9600 to 2000000, plus a custom value. Changing the baud reopens the port.
+- Baud presets from 9600 to 2000000, plus a custom value (`Custom…`, 300 to 10000000). Changing the baud reopens the port.
 - Frame format: 8N1 by default; 8E1, 8O1, 8N2, 7E1, 7O1, 7N1 from the menu (Web Serial `dataBits`/`parity`/`stopBits`). Changing it reopens the port.
-- Timestamps: an optional prefix per received line.
+- Timestamps (`Ctrl+A t`): a dim `12:34:56.789` before each received line, taken when its first byte arrives. They are added after the log-level colorizer, so it still sees `E (` at the start of a line (`src/monitor/timestamps.ts`).
 - DTR/RTS toggles, **Reset** (EN pulse), **Boot** (enter the download mode sequence). The sequences follow esptool and depend on the port:
   - USB-UART bridge (CP210x, CH340, FTDI…): the classic auto-reset circuit. `(DTR,RTS)` = `(0,1)` 100 ms → `(1,0)` 50 ms → `(0,0)`.
   - Espressif USB-Serial/JTAG (`303a:1001`: C3, C5, C6, H2, P4, S3 native USB): strap first, then reset, passing through `(1,1)`. `(0,0)` → `(1,0)` → `(1,1)` → `(0,1)` 100 ms → `(0,0)`. The classic sequence does not latch download mode here. This is the likely reason boot mode failed on an ESP32-C5 in M0 testing; not yet confirmed on hardware.
   - Each step sets both lines in one `setSignals()` call, so a USB adapter sees one control-line change per step.
   - ESP32-S2/S3 USB-OTG CDC (TinyUSB) is not handled yet; it needs the manual BOOT+RESET path (§5).
 - Scrollback of 10k lines (configurable); scroll lock when the user scrolls up; clear.
-- **Save log**: download the whole session as `.log`, ANSI stripped or kept.
+- **Save log** (`Ctrl+A l`): download the session as `esp-monitor-YYYYMMDD-HHMMSS.log`, plain text or with ANSI codes (`.ansi.log`). It is what the monitor showed, timestamps and flasher notes included, up to the newest 32 MiB (`src/monitor/session-log.ts`). Clear doesn't empty it.
 - Decoding: UTF-8 with a streaming decoder (multi-byte sequences split across chunks are handled); invalid bytes show as `�`.
 - *Later*: hex view, ELF-based backtrace decoding (needs the `.elf`, which could be an optional manifest field).
 
@@ -483,7 +483,7 @@ Settings live in `localStorage`, so every browser (each computer or phone) keeps
 |---|---|---|
 | M0 ✅ | Scaffold (Vite/TS), `Tty` + input parser, Screen/diff renderer, layout + core widgets, keymap, help overlay, CI + Pages deploy. **Spike**: `requestPort()` from a key and from a mouse click via xterm `onData`; headless-terminal blit performance at 2 Mbaud | The empty shell is live on Pages, CI is green, and the spike passes |
 | M1 ✅ | The Manifest field (local file + folder grant, URL, folder URL, GitHub release listing), manifest parser + adapters, editable parts table with red rows and locks, `?manifest=`; esptool-js: chip info (`i`), validation, flash/verify/reset (`F`), erase (`E`), dump to a file (`D`), stop (`Esc`). Tested end to end against a simulated ESP32-S3 (§13); **needs a hardware run** | A local IDF build flashes onto ESP32 and ESP32-S3 |
-| M2 | Serial monitor, port handoff, native-USB reconnect | Flash → auto-monitor works on a native-USB chip |
+| M2 ✅ | Serial monitor, port handoff, native-USB reconnect; timestamps, line input, DTR/RTS, custom baud, save log; focus moves to the monitor after a flash with Reset after. **Needs a hardware run** | Flash → auto-monitor works on a native-USB chip |
 | M2b | **Phones**: compact size class, touch bridge, extra-keys bar, soft-keyboard handling, WebUSB + `web-serial-polyfill` fallback with the CDC-only notice, Android device emulation in e2e | Flash + monitor a native-USB ESP32 from an Android phone over OTG |
 | M3 | GitHub release files through the asset proxy (once the rate limit is settled), Manual assist download, release notes | A real release with `esp-web-tool.json` flashes via manual assist |
 | M4 | Proxy hardening (caching, limits) and self-hosting docs, JSON Schema, producer workflow docs | One-click flash from a release link |

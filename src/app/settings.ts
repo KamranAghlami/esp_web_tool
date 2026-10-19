@@ -41,6 +41,9 @@ export interface MonitorSettings {
   /** Index into LINE_ENDINGS. */
   eol: number;
   colorize: boolean;
+  timestamps: boolean;
+  /** Line input instead of raw keys. */
+  lineMode: boolean;
 }
 
 /** The part of the Web Storage API we use; localStorage in the page, a Map in tests. */
@@ -71,7 +74,14 @@ export function defaultDeviceSettings(): DeviceSettings {
       verify: true,
       resetAfter: true,
     },
-    monitor: { baud: 115200, format: '8N1', eol: 0, colorize: true },
+    monitor: {
+      baud: 115200,
+      format: '8N1',
+      eol: 0,
+      colorize: true,
+      timestamps: false,
+      lineMode: false,
+    },
   };
 }
 
@@ -111,6 +121,8 @@ function parseDevice(v: unknown): DeviceSettings {
         d.monitor.eol,
       ),
       colorize: bool(m.colorize, d.monitor.colorize),
+      timestamps: bool(m.timestamps, d.monitor.timestamps),
+      lineMode: bool(m.lineMode, d.monitor.lineMode),
     },
   };
 }

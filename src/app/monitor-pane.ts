@@ -1,11 +1,13 @@
 import { LogColorizer } from '../monitor/log-color';
 import type { IMarker } from '@xterm/headless';
+import { SessionLog } from '../monitor/session-log';
 import { TermPane } from '../monitor/term-pane';
+import { Timestamper } from '../monitor/timestamps';
 import type { KeyEvent, MouseEvent } from '../tty/input';
 import type { Ctx } from '../tui/context';
 import type { Rect } from '../tui/screen';
 import { Attr } from '../tui/style';
-import type { Focusable } from '../tui/widgets';
+import { type Focusable, TextInput } from '../tui/widgets';
 
 const RESET = new TextEncoder().encode('\x1b[0m');
 /** Presses closer together than this (on the same cell) count as a double or triple click. */
@@ -47,6 +49,17 @@ export class MonitorPane implements Focusable {
   active = false;
   /** Color plain ESP-IDF log lines by level (Ctrl+A h toggles). */
   colorize = true;
+  /** Prefix each received line with the time (Ctrl+A t). */
+  timestamps = false;
+  /**
+   * Line input (Ctrl+A i): keys edit a local line, sent with the line ending on Enter.
+   * Raw (the default) sends every key at once, which REPLs need.
+   */
+  lineMode = false;
+  /** The local line while in line mode and live. */
+  readonly input = new TextInput('', 'type a line, Enter sends it');
+  /** Everything shown this session, for Save log. */
+  readonly log = new SessionLog();
   /** Raw bytes received, before coloring (for the rx rate). */
   bytesIn = 0;
   /** Called with the selected text when a drag selection ends. */
@@ -57,6 +70,7 @@ export class MonitorPane implements Focusable {
   now: () => number = () => performance.now();
   private hasOutput = false;
   private colorizer = new LogColorizer();
+  private stamper = new Timestamper();
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
   private encoder = new TextEncoder();
 
@@ -67,21 +81,34 @@ export class MonitorPane implements Focusable {
   write(data: string | Uint8Array, onParsed: () => void): void {
     this.hasOutput = true;
     this.bytesIn += data.length;
+    const bytes = typeof data === 'string' ? this.encoder.encode(data) : data;
     if (!this.colorize) {
-      this.pane.write(data, onParsed);
+      this.show(bytes, onParsed);
       return;
     }
-    const bytes = typeof data === 'string' ? this.encoder.encode(data) : data;
-    this.pane.write(this.colorizer.push(bytes), onParsed);
+    this.show(this.colorizer.push(bytes), onParsed);
     if (this.flushTimer) clearTimeout(this.flushTimer);
     this.flushTimer = null;
     // A held line prefix (e.g. the echo of a typed "E") must not wait for the next byte.
     if (this.colorizer.holding) {
       this.flushTimer = setTimeout(() => {
         this.flushTimer = null;
-        this.pane.write(this.colorizer.flush(), onParsed);
+        this.show(this.colorizer.flush(), onParsed);
       }, 30);
     }
+  }
+
+  /** Into the terminal (and the session log), stamped with the time if that is on. */
+  private show(bytes: Uint8Array, onParsed?: () => void): void {
+    if (!bytes.length) return;
+    const out = this.timestamps ? this.stamper.push(bytes) : bytes;
+    this.log.push(out);
+    this.pane.write(out, onParsed);
+  }
+
+  toggleTimestamps(): void {
+    this.timestamps = !this.timestamps;
+    this.stamper.reset();
   }
 
   /**
@@ -91,13 +118,17 @@ export class MonitorPane implements Focusable {
   note(text: string, onParsed?: () => void): void {
     this.hasOutput = true;
     const body = text.replace(/\r?\n/g, '\r\n');
-    this.pane.write(Uint8Array.from([...this.colorizer.flush()]), onParsed);
-    this.pane.write(`\x1b[0;90m${body}\x1b[0m`, onParsed);
+    this.show(this.colorizer.flush(), onParsed);
+    const note = `\x1b[0;90m${body}\x1b[0m`;
+    this.log.push(note);
+    this.pane.write(note, onParsed);
+    // A note ending a line starts a fresh one for the device's output too.
+    if (body.endsWith('\n')) this.stamper.reset();
   }
 
   toggleColorize(): void {
     // Flush a held prefix and end any color the colorizer started mid-line.
-    if (this.colorize) this.pane.write(Uint8Array.from([...this.colorizer.flush(), ...RESET]));
+    if (this.colorize) this.show(Uint8Array.from([...this.colorizer.flush(), ...RESET]));
     this.colorizer.reset();
     this.colorize = !this.colorize;
   }
@@ -109,8 +140,16 @@ export class MonitorPane implements Focusable {
     this.hasOutput = false;
   }
 
-  render(ctx: Ctx, r: Rect): void {
+  render(ctx: Ctx, rect: Rect): void {
     const { screen, theme } = ctx;
+    let r = rect;
+    // Line mode, live: the bottom row is the local input line.
+    if (this.lineMode && this.live && r.h > 3) {
+      const y = r.y + r.h - 1;
+      screen.text(r.x, y, '›', { fg: theme.accent, attrs: Attr.Bold });
+      this.input.render(ctx, { x: r.x + 2, y, w: r.w - 2, h: 1 }, true);
+      r = { ...r, h: r.h - 1 };
+    }
     this.pane.resize(r.w, r.h);
 
     if (!this.hasOutput && !this.active) {
@@ -131,7 +170,7 @@ export class MonitorPane implements Focusable {
       if (this.pane.scrolledBack) {
         const tag = ' ↑ scrollback · G to bottom ';
         screen.text(r.x + r.w - tag.length, r.y, tag, { fg: theme.selFg, bg: theme.selBg });
-      } else if (this.live) {
+      } else if (this.live && !this.lineMode) {
         const b = this.pane.term.buffer.active;
         ctx.cursor.visible = true;
         ctx.cursor.x = r.x + Math.min(b.cursorX, r.w - 1);

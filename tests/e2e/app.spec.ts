@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { expect, type Page, test } from '@playwright/test';
 import { cellCenter, expectOnScreen, openApp, type ReadyInfo, screenText } from './harness';
 
@@ -546,5 +547,72 @@ test.describe('app', () => {
     // case (see SPEC §14, M0 findings). The JS pipeline itself is benchmarked in term-pane.test.ts.
     expect(stats.rxPerSec).toBeGreaterThan(50 * 1024);
     expect(stats.fps).toBeGreaterThanOrEqual(5);
+  });
+});
+
+test.describe('monitor extras', () => {
+  test.beforeEach(async ({ page }) => {
+    await openApp(page);
+    await page.keyboard.press('c');
+    await expectOnScreen(page, 'hello from fake port');
+  });
+
+  test('timestamps, line input, DTR/RTS and a custom baud', async ({ page }) => {
+    await page.keyboard.press('Control+a');
+    await page.keyboard.press('t');
+    await page.evaluate(() => (window as any).__serialEmit('I (9) stamped\r\n'));
+    await expect
+      .poll(async () => (await screenText(page)).join('\n'))
+      .toMatch(/\d\d:\d\d:\d\d\.\d\d\d I \(9\) stamped/);
+
+    // Line mode: nothing is sent until Enter.
+    await page.keyboard.press('Control+a');
+    await page.keyboard.press('s');
+    await page.keyboard.press('i');
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('Enter');
+    await page.keyboard.press('Escape'); // out of Settings
+    await page.keyboard.press('Escape'); // out of the menu
+    await page.keyboard.press('Enter'); // live
+    await page.keyboard.type('hey');
+    await expectOnScreen(page, '› [hey');
+    expect(await page.evaluate(() => (window as any).__serialWritten)).toBe('');
+    await page.keyboard.press('Enter');
+    await expect.poll(() => page.evaluate(() => (window as any).__serialWritten)).toBe('hey\n');
+    await page.keyboard.press('Control+]');
+
+    await page.keyboard.press('Control+a');
+    await page.keyboard.press('d');
+    await page.keyboard.press('d'); // DTR on
+    await expect
+      .poll(() => page.evaluate(() => (window as any).__serialSignals.at(-1)))
+      .toBe('1,0');
+    await page.keyboard.press('Escape');
+    await page.keyboard.press('Escape');
+
+    await page.keyboard.press('Control+a');
+    await page.keyboard.press('s');
+    await page.keyboard.press('b');
+    await page.keyboard.press('End');
+    await page.keyboard.press('Enter'); // Custom…
+    await expectOnScreen(page, 'Custom baud');
+    await page.keyboard.press('Control+u');
+    await page.keyboard.type('250000');
+    await page.keyboard.press('Enter');
+    await expectOnScreen(page, '@ 250000 8N1');
+  });
+
+  test('the session log is saved as plain text', async ({ page }) => {
+    await page.evaluate(() => (window as any).__serialEmit('\x1b[0;31mE (5) bad\x1b[0m\r\n'));
+    await expectOnScreen(page, 'E (5) bad');
+    await page.keyboard.press('Control+a');
+    await page.keyboard.press('l');
+    const download = page.waitForEvent('download');
+    await page.keyboard.press('p');
+    const file = await download;
+    expect(file.suggestedFilename()).toMatch(/^esp-monitor-\d{8}-\d{6}\.log$/);
+    const text = readFileSync(await file.path(), 'utf8');
+    expect(text).toContain('hello from fake port\nE (5) bad\n');
+    expect(text).not.toContain('\x1b');
   });
 });

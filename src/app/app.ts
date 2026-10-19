@@ -24,6 +24,7 @@ import {
   type MenuItem,
   type MenuOptions,
   spinner,
+  TextInput,
 } from '../tui/widgets';
 import { stringWidth } from '../tui/width';
 import { sameChip, sizeBytes } from '../flash/chip';
@@ -68,7 +69,8 @@ type Overlay =
   | { kind: 'confirm'; title: string; body: string[]; danger: boolean; answer(yes: boolean): void }
   | { kind: 'menu'; menu: Menu }
   | { kind: 'part'; editor: PartEditor }
-  | { kind: 'dump'; dialog: DumpDialog };
+  | { kind: 'dump'; dialog: DumpDialog }
+  | { kind: 'prompt'; title: string; hint: string; input: TextInput; submit(v: string): boolean };
 export type DemoMode = 'off' | 'normal' | 'flood';
 
 /** How a gesture-gated browser call was triggered, for the M0 spike (SPEC §3.1). */
@@ -325,6 +327,8 @@ export class App {
     this.ports.format = monitor.format;
     this.monitor.eol = monitor.eol;
     if (this.monitor.colorize !== monitor.colorize) this.monitor.toggleColorize();
+    if (this.monitor.timestamps !== monitor.timestamps) this.monitor.toggleTimestamps();
+    this.monitor.lineMode = monitor.lineMode;
   }
 
   /**
@@ -388,6 +392,8 @@ export class App {
         format: this.ports.format,
         eol: this.monitor.eol,
         colorize: this.monitor.colorize,
+        timestamps: this.monitor.timestamps,
+        lineMode: this.monitor.lineMode,
       },
     };
   }
@@ -421,6 +427,7 @@ export class App {
       if (e.type === 'key') this.overlayKey(e);
       else if (this.overlay.kind === 'part') this.overlay.editor.handlePaste(e.text);
       else if (this.overlay.kind === 'dump') this.overlay.dialog.handlePaste(e.text);
+      else if (this.overlay.kind === 'prompt') this.overlay.input.handlePaste(e.text);
       return;
     }
 
@@ -516,6 +523,13 @@ export class App {
       o.dialog.handleKey(e);
       return;
     }
+    if (o.kind === 'prompt') {
+      if (e.name === 'escape') this.overlay = null;
+      else if (e.name === 'enter') {
+        if (o.submit(o.input.value.trim())) this.overlay = null;
+      } else o.input.handleKey(e);
+      return;
+    }
     if (o.kind === 'help') {
       if (e.name === 'escape' || e.name === 'q' || e.name === '?' || e.name === 'enter')
         this.overlay = null;
@@ -550,8 +564,21 @@ export class App {
 
   /** Keys while the monitor is live go to the device, except Ctrl+] and the Ctrl+A menu. */
   private liveInput(e: KeyEvent | PasteEvent): void {
+    const m = this.monitor;
+    if (m.lineMode && e.type === 'paste') {
+      m.input.handlePaste(e.text);
+      return;
+    }
     if (e.type === 'paste') {
       this.send(e.text.replace(/\r?\n/g, this.monitor.lineEnding.value));
+      return;
+    }
+    if (m.lineMode && !e.ctrl) {
+      if (e.name === 'enter') {
+        this.send(m.input.value + m.lineEnding.value);
+        m.input.setValue('');
+        m.pane.scrollToBottom();
+      } else m.input.handleKey(e);
       return;
     }
     if (e.ctrl && e.name === ']') {
@@ -613,6 +640,14 @@ export class App {
           action: () => this.toggleColors(),
         },
         {
+          key: 't',
+          label: 'Timestamps',
+          checked: m.timestamps,
+          action: () => m.toggleTimestamps(),
+        },
+        { key: 'd', label: 'Lines: DTR / RTS ▸', action: () => this.openLinesMenu() },
+        { key: 'l', label: 'Save log ▸', action: () => this.openSaveLogMenu() },
+        {
           key: 'f',
           label: 'Fullscreen pane',
           checked: this.zoomed,
@@ -640,6 +675,11 @@ export class App {
           label: `Line ending: ${m.lineEnding.label} ▸`,
           action: () => this.openEolMenu(),
         },
+        {
+          key: 'i',
+          label: `Input: ${m.lineMode ? 'line' : 'raw'} ▸`,
+          action: () => this.openInputMenu(),
+        },
       ],
       { within: this.monitorArea(), onBack: () => this.openMonitorMenu('s') },
       from ?? 'b',
@@ -660,14 +700,97 @@ export class App {
   }
 
   private openBaudMenu(): void {
-    this.openSettingsList(
-      'Baud rate',
-      'b',
-      MONITOR_BAUDS.map((b) => ({
+    this.openSettingsList('Baud rate', 'b', [
+      ...MONITOR_BAUDS.map((b) => ({
         label: String(b),
         checked: b === this.ports.baudRate,
         action: () => this.setMonitorBaud(b),
       })),
+      {
+        label: MONITOR_BAUDS.includes(this.ports.baudRate)
+          ? 'Custom…'
+          : `Custom… (${this.ports.baudRate})`,
+        checked: !MONITOR_BAUDS.includes(this.ports.baudRate),
+        action: () => this.promptBaud(),
+      },
+    ]);
+  }
+
+  /** Any baud the port takes (e.g. 74880 is in the list; 250000 isn't). */
+  private promptBaud(): void {
+    this.overlay = {
+      kind: 'prompt',
+      title: 'Custom baud',
+      hint: '300 to 10000000',
+      input: new TextInput(String(this.ports.baudRate)),
+      submit: (v) => {
+        const b = Number(v);
+        if (!Number.isInteger(b) || b < 300 || b > 10_000_000) {
+          this.notify(`Not a baud rate: ${v}`, 'warn');
+          return false;
+        }
+        this.setMonitorBaud(b);
+        return true;
+      },
+    };
+  }
+
+  private openInputMenu(): void {
+    const m = this.monitor;
+    this.openSettingsList('Input', 'i', [
+      {
+        label: 'Raw: every key is sent at once (REPLs)',
+        checked: !m.lineMode,
+        action: () => (m.lineMode = false),
+      },
+      {
+        label: 'Line: edit locally, Enter sends',
+        checked: m.lineMode,
+        action: () => (m.lineMode = true),
+      },
+    ]);
+  }
+
+  /** DTR/RTS by hand; on auto-reset boards DTR pulls IO0 low and RTS holds the chip in reset. */
+  private openLinesMenu(): void {
+    const p = this.ports;
+    const set = (dtr: boolean, rts: boolean) => {
+      if (p.state !== 'open') return this.notify('Connect a port first (c)', 'warn');
+      void p.setLines(dtr, rts).then(() => this.openLinesMenu());
+    };
+    this.openMenu(
+      'Lines',
+      [
+        { key: 'd', label: 'DTR (IO0 low)', checked: p.dtr, action: () => set(!p.dtr, p.rts) },
+        {
+          key: 'r',
+          label: 'RTS (EN low: in reset)',
+          checked: p.rts,
+          action: () => set(p.dtr, !p.rts),
+        },
+      ],
+      { within: this.monitorArea(), onBack: () => this.openMonitorMenu('d') },
+    );
+  }
+
+  private openSaveLogMenu(): void {
+    const save = (ansi: boolean) => {
+      const log = this.monitor.log;
+      if (!log.length) return this.notify('Nothing to save yet', 'warn');
+      const d = new Date();
+      const p = (n: number) => String(n).padStart(2, '0');
+      const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+      const name = `esp-monitor-${stamp}${ansi ? '.ansi' : ''}.log`;
+      this.files.save(name, log.text(ansi));
+      this.notify(`Saved ${name}`, 'ok');
+    };
+    this.openMenu(
+      'Save log',
+      [
+        { key: 'p', label: 'Plain text', action: () => save(false) },
+        { key: 'a', label: 'With colors (ANSI codes)', action: () => save(true) },
+      ],
+      { within: this.monitorArea(), onBack: () => this.openMonitorMenu('l') },
     );
   }
 
@@ -949,6 +1072,8 @@ export class App {
       },
     );
     this.notify(res.text, res.ok ? 'ok' : 'error');
+    // Auto-monitor (SPEC §5.6): the app's first lines are what you want to see next.
+    if (res.ok && f.resetAfter.checked) this.focusPane('monitor');
   }
 
   /** `E`: erase the whole flash chip, after a confirmation that Enter can't give. */
@@ -1438,6 +1563,12 @@ export class App {
     }
     if (o.kind === 'dump') {
       o.dialog.render(ctx, this.rects.flash ?? this.rects.main!);
+      return;
+    }
+    if (o.kind === 'prompt') {
+      const inner = dialog(ctx, o.title, 40, 6, undefined, this.monitorArea());
+      o.input.render(ctx, { x: inner.x + 2, y: inner.y + 1, w: inner.w - 4, h: 1 }, true);
+      screen.text(inner.x + 2, inner.y + 2, o.hint, { fg: theme.dim, bg: theme.inputBg });
       return;
     }
     if (o.kind === 'confirm') {
