@@ -413,7 +413,7 @@ export class FlashPlan {
     }));
     const what = [m.name, m.version].filter(Boolean).join(' ') || 'Manifest';
     const sets = m.sets.length > 1 ? ` · ${m.sets.length} sets` : '';
-    this.setStatus('ok', `${what}${sets} (${m.format})`);
+    this.setStatus('ok', `${what}${sets} (${m.format}${m.warning ? `; ${m.warning}` : ''})`);
     this.onSet?.(set);
     for (const row of this.rows) this.readRow(row);
   }

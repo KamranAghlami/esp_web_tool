@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kamranaghlami.github.io/esp_web_tool/schema/v1.json",
+  "title": "ESP Web Tool manifest (esp-web-tool.json), version 1",
+  "description": "Flash sets for ESP Web Tool: each set is the parts (binaries at offsets) for one board or chip. See docs/SPEC.md §6.",
+  "type": "object",
+  "required": ["sets"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "manifestVersion": {
+      "description": "1. A larger version is read with a warning.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "name": { "type": "string" },
+    "version": { "type": "string" },
+    "sets": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/set" }
+    }
+  },
+  "$defs": {
+    "offset": {
+      "description": "A hex string (\"0x10000\" or \"10000\") or a non-negative integer.",
+      "oneOf": [
+        { "type": "string", "pattern": "^(0[xX])?[0-9a-fA-F]{1,8}$" },
+        { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+      ]
+    },
+    "chip": {
+      "enum": [
+        "ESP32",
+        "ESP32-S2",
+        "ESP32-S3",
+        "ESP32-C2",
+        "ESP32-C3",
+        "ESP32-C5",
+        "ESP32-C6",
+        "ESP32-C61",
+        "ESP32-H2",
+        "ESP32-P4"
+      ]
+    },
+    "set": {
+      "type": "object",
+      "required": ["id", "parts"],
+      "properties": {
+        "id": {
+          "description": "Unique within the manifest; used by the &set= deep link.",
+          "type": "string",
+          "minLength": 1
+        },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "chip": {
+          "description": "The set matching the connected chip is preselected.",
+          "$ref": "#/$defs/chip"
+        },
+        "flash": {
+          "type": "object",
+          "properties": {
+            "mode": { "enum": ["qio", "qout", "dio", "dout", "keep"] },
+            "freq": { "type": "string" },
+            "size": { "type": "string" }
+          }
+        },
+        "eraseAll": { "type": "boolean" },
+        "baudrate": { "type": "integer", "minimum": 300 },
+        "monitorBaudrate": { "type": "integer", "minimum": 300 },
+        "locked": {
+          "description": "Lock every part of this set: users can add parts, not change these.",
+          "type": "boolean"
+        },
+        "parts": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/part" }
+        }
+      }
+    },
+    "part": {
+      "type": "object",
+      "required": ["path", "offset"],
+      "properties": {
+        "path": {
+          "description": "Relative to the manifest (in a release: an asset of the same release), or a full https:// URL.",
+          "type": "string",
+          "minLength": 1
+        },
+        "offset": { "$ref": "#/$defs/offset" },
+        "sha256": {
+          "description": "Checked before flashing.",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "locked": {
+          "description": "Users can't delete, edit or disable this part.",
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

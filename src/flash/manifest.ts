@@ -10,6 +10,8 @@ export interface Manifest {
   /** Which format it was read as, for the status line. */
   format: 'esp-web-tool' | 'esp-web-tools' | 'flasher_args';
   sets: PlanSet[];
+  /** Read anyway, but worth saying (a newer manifestVersion). */
+  warning?: string;
 }
 
 export interface PlanSet {
@@ -96,11 +98,14 @@ function parseOurs(o: Obj): Manifest {
   if (sets.length === 0) throw new ManifestError('"sets" is empty');
   const ids = new Set(sets.map((s) => s.id));
   if (ids.size !== sets.length) throw new ManifestError('set ids are not unique');
+  // Unknown fields are ignored, so a newer version is read as v1 (SPEC §6).
+  const v = optNum(o.manifestVersion);
   return {
     name: optStr(o.name),
     version: optStr(o.version),
     format: 'esp-web-tool',
     sets,
+    ...(v !== undefined && v > 1 ? { warning: `manifestVersion ${v}, read as 1` } : {}),
   };
 }
 

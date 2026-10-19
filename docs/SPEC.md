@@ -484,7 +484,7 @@ Settings live in `localStorage`, so every browser (each computer or phone) keeps
 
 **`.github/workflows/proxy.yml`** (optional, M4) — deploys `proxy/` with `wrangler` when `proxy/**` changes. Needs `CLOUDFLARE_API_TOKEN`.
 
-**Producer side** (M4): document a workflow snippet, possibly a reusable action, that firmware repos can use. It builds with ESP-IDF, converts `build/flasher_args.json` into `esp-web-tool.json`, and attaches both the manifest and the binaries to the release.
+**Producer side** (M4, done): [docs/producer.md](producer.md) has the workflow snippet. It builds with ESP-IDF, converts `build/flasher_args.json` into `esp-web-tool.json` with `tools/flasher-args-to-manifest.mjs`, and attaches the manifest and the binaries to the release; optionally it mirrors them to Pages. A reusable action is still an option for later.
 
 ## 13. Testing
 
@@ -503,7 +503,7 @@ Settings live in `localStorage`, so every browser (each computer or phone) keeps
 | M2 ✅ | Serial monitor, port handoff, native-USB reconnect; timestamps, line input, DTR/RTS, custom baud, save log; focus moves to the monitor after a flash with Reset after. **Needs a hardware run** | Flash → auto-monitor works on a native-USB chip |
 | M2b ✅ | **Phones**: compact size class, touch bridge, extra-keys bar, soft-keyboard handling, WebUSB + `web-serial-polyfill` fallback (plus CH340), Android device emulation in e2e. **Needs a real phone** | Flash + monitor a native-USB ESP32 from an Android phone over OTG |
 | M3 | GitHub release files through the asset proxy (once the rate limit is settled; **not started**). Done 2026-10-19: manual assist (download links, drop or pick, matched by name), drag and drop, release notes, ● and Load more in the release list, `&tag/&set/&baud/&monitor` deep links | A real release with `esp-web-tool.json` flashes via manual assist |
-| M4 | Proxy hardening (caching, limits) and self-hosting docs, JSON Schema, producer workflow docs | One-click flash from a release link |
+| M4 | Proxy hardening (caching, limits) and self-hosting docs (**wait for the proxy**). Done 2026-10-19: the JSON Schema (`public/schema/v1.json`, served at `/schema/v1.json`), the producer guide with a release workflow and the Pages-mirror option ([docs/producer.md](producer.md)), and `tools/flasher-args-to-manifest.mjs` (flasher_args.json → esp-web-tool.json with sha256 and locks) | One-click flash from a release link |
 | M5 | Polish: light theme, log save, error hints, accessibility pass, installable app (PWA) | — |
 
 ### M0 findings (2026-10-17)

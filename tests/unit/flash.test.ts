@@ -60,6 +60,12 @@ describe('manifest formats', () => {
     expect(idf.sets[0]!.parts.map((p) => p.offset)).toEqual([0, 0x10000]);
   });
 
+  it('reads a newer manifestVersion anyway, with a warning', () => {
+    const m = parseManifest(JSON.stringify({ ...OURS, manifestVersion: 2, future: true }));
+    expect(m.warning).toBe('manifestVersion 2, read as 1');
+    expect(m.sets).toHaveLength(2);
+  });
+
   it('explains what is wrong', () => {
     expect(() => parseManifest('{')).toThrow('not valid JSON');
     expect(() => parseManifest('{"sets":[{"id":"a","parts":[{"path":"x"}]}]}')).toThrow(
