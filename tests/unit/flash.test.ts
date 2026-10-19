@@ -294,29 +294,67 @@ describe('FlashPlan', () => {
     expect(again.rows[2]!.data?.length).toBe(30);
   });
 
-  it('says when GitHub release files need the asset proxy', async () => {
+  it('without the asset proxy, release files are downloaded by hand and matched by name', async () => {
+    const dl = (n: string) => `https://github.com/o/r/releases/download/v1/${n}`;
+    const manifest = {
+      name: 'Rel',
+      sets: [
+        {
+          id: 'a',
+          parts: [
+            { path: 'boot.bin', offset: 0, locked: true },
+            { path: 'app.bin', offset: 0x10000 },
+          ],
+        },
+      ],
+    };
     const host: FileHost = {
       ...fakeHost({}).host,
       fetchJson: async () => [
-        {
-          tag_name: 'v2',
-          prerelease: true,
-          assets: [],
-        },
+        { tag_name: 'v2', prerelease: true, assets: [] },
         {
           tag_name: 'v1',
-          assets: [
-            {
-              name: 'esp-web-tool.json',
-              browser_download_url: 'https://github.com/o/r/releases/download/v1/esp-web-tool.json',
-            },
-          ],
+          body: '## Changes',
+          assets: [{ name: 'esp-web-tool.json', browser_download_url: dl('esp-web-tool.json') }],
         },
       ],
     };
     const plan = new FlashPlan(host, () => {});
     await plan.load('o/r');
     expect(plan.release?.tag).toBe('v1'); // latest full release, not the pre-release
-    expect(plan.status.text).toMatch(/need the asset proxy/);
+    expect(plan.release?.body).toBe('## Changes');
+    expect(plan.status.kind).toBe('manual');
+    expect(plan.downloads).toEqual([{ name: 'esp-web-tool.json', url: dl('esp-web-tool.json') }]);
+
+    // The downloaded manifest stands for the release: its parts are release files too.
+    await plan.takeFiles([file('esp-web-tool.json', enc.encode(JSON.stringify(manifest)))]);
+    await settle();
+    expect(plan.releases).not.toBeNull();
+    expect(plan.downloads.map((d) => d.url)).toEqual([dl('boot.bin'), dl('app.bin')]);
+    expect(plan.rows.every((r) => r.error === 'download it, then drop it here (m)')).toBe(true);
+
+    const res = await plan.takeFiles([
+      file('app.bin', bytes(64)),
+      file('boot.bin', bytes(32)),
+      file('extra.bin', bytes(16)),
+    ]);
+    await settle();
+    expect(res).toEqual({ matched: 2, added: 1 });
+    expect(plan.rows.map((r) => [r.name, r.locked, r.data?.length, r.error])).toEqual([
+      ['boot.bin', true, 32, null],
+      ['app.bin', false, 64, null],
+      ['extra.bin', false, 16, null],
+    ]);
+    expect(plan.downloads).toEqual([]);
+  });
+
+  it('a deep-linked set is selected when the manifest loads', async () => {
+    const { host } = fakeHost({
+      'https://x.dev/fw/esp-web-tool.json': enc.encode(JSON.stringify(OURS)),
+    });
+    const plan = new FlashPlan(host, () => {});
+    plan.wantSet = 'c3';
+    await plan.load('x.dev/fw');
+    expect(plan.set?.id).toBe('c3');
   });
 });

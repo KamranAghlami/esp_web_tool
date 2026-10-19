@@ -53,6 +53,9 @@ export class FlashPane {
   jobs: JobRunner | null = null;
   /** Enter was pressed in the Manifest field. */
   onSubmitted?: () => void;
+  /** The release notes (`n`) and the manual-assist downloads (`m`) were clicked. */
+  onNotes?: () => void;
+  onDownloads?: () => void;
 
   constructor(host: FileHost, onChange: () => void, proxy?: string) {
     const plan = (this.plan = new FlashPlan(host, onChange, proxy));
@@ -141,7 +144,16 @@ export class FlashPane {
       this.release.index = Math.max(0, plan.releaseIndex);
       x = screen.text(x, pickRow!.y, 'Release ', { fg: theme.dim });
       this.release.render(ctx, { x, y: pickRow!.y, w: this.release.width, h: 1 }, f(this.release));
-      x += this.release.width + 2;
+      x += this.release.width + 1;
+      if (plan.release?.body.trim()) {
+        const notes = ' Notes ';
+        screen.text(x, pickRow!.y, notes, { fg: theme.accent, bg: theme.inputBg });
+        ctx.hits.add({ x, y: pickRow!.y, w: notes.length, h: 1 }, (e) => {
+          if (e.action === 'down') this.onNotes?.();
+        });
+        x += notes.length;
+      }
+      x += 1;
     }
     const sets = plan.manifest?.sets ?? [];
     if (sets.length > 1) {
@@ -155,11 +167,27 @@ export class FlashPane {
     // Status of the manifest: name and sets, an error, or what is loading.
     const st = plan.status;
     if (st.text) {
-      const icon = st.kind === 'loading' ? `${spinner(ctx)} ` : st.kind === 'error' ? '✗ ' : '';
-      const color = st.kind === 'error' ? theme.error : st.kind === 'ok' ? theme.fg : theme.dim;
+      const icon =
+        st.kind === 'loading'
+          ? `${spinner(ctx)} `
+          : st.kind === 'error'
+            ? '✗ '
+            : st.kind === 'manual'
+              ? '↓ '
+              : '';
+      const color = {
+        error: theme.error,
+        ok: theme.fg,
+        manual: theme.warn,
+        loading: theme.dim,
+        idle: theme.dim,
+      }[st.kind];
       screen.text(statusRow!.x + 1, statusRow!.y, truncate(icon + st.text, statusRow!.w - 2), {
         fg: color,
       });
+      // Manual assist: the status line opens the list of files to download.
+      if (st.kind === 'manual')
+        ctx.hits.add(statusRow!, (e) => e.action === 'down' && this.onDownloads?.());
     }
 
     const on = plan.rows.filter((p) => p.enabled).length;

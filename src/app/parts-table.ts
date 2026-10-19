@@ -20,6 +20,8 @@ export class PartsTable implements Focusable {
   private scroll = 0;
   private lastHeight = 1;
   onNotify?: Notify;
+  /** Show what to download by hand (manual assist). */
+  onDownloads?: () => void;
   /** Open the part dialog for `row`, or for a new part when null. */
   onEdit?: (row: PlanRow | null) => void;
 
@@ -67,7 +69,15 @@ export class PartsTable implements Focusable {
     const { screen, theme } = ctx;
     let body = r;
     const access = this.plan.access;
-    if (access) {
+    const downloads = !access && this.plan.downloads.length > 0;
+    if (downloads) {
+      const msg = '↓ Release files: download them, then drop or pick them (m, or click)';
+      screen.text(r.x, r.y, truncate(msg, r.w), { fg: theme.warn });
+      ctx.hits.add({ x: r.x, y: r.y, w: r.w, h: 1 }, (e) => {
+        if (e.action === 'down') this.onDownloads?.();
+      });
+      body = { ...r, y: r.y + 1, h: r.h - 1 };
+    } else if (access) {
       const msg =
         access === 'folder'
           ? '! Parts sit next to the manifest: o (or click) to grant its folder'

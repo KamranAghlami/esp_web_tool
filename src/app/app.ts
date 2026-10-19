@@ -27,7 +27,9 @@ import {
   spinner,
   TextInput,
 } from '../tui/widgets';
-import { stringWidth } from '../tui/width';
+import { stringWidth, wrap } from '../tui/width';
+import type { LocalFile } from '../flash/host';
+import { manifestAsset } from '../flash/github';
 import { sameChip, sizeBytes } from '../flash/chip';
 import { formatOffset } from '../flash/offsets';
 import { checkPlan } from '../flash/validate';
@@ -90,7 +92,8 @@ type Overlay =
   | { kind: 'menu'; menu: Menu }
   | { kind: 'part'; editor: PartEditor }
   | { kind: 'dump'; dialog: DumpDialog }
-  | { kind: 'prompt'; title: string; hint: string; input: TextInput; submit(v: string): boolean };
+  | { kind: 'prompt'; title: string; hint: string; input: TextInput; submit(v: string): boolean }
+  | { kind: 'notes'; title: string; text: string; scroll: number };
 export type DemoMode = 'off' | 'normal' | 'flood';
 
 /** How a gesture-gated browser call was triggered, for the M0 spike (SPEC §3.1). */
@@ -123,6 +126,8 @@ export interface AppOptions {
   keyboard?: (show: boolean) => void;
   /** The terminal's font size, changed with `-` / `+` and remembered per browser. */
   fontSize?: { get(): number; set(px: number): void };
+  /** Deep-link extras (SPEC §10): preselect a set, override the flash and monitor baud. */
+  link?: { set?: string; baud?: number; monitor?: number };
   /** File pickers, folder access and fetch for the flash plan (`src/browser/files.ts`). */
   files: FileHost;
   /** Asset proxy base URL for GitHub release files (SPEC §7.4); none until it exists. */
@@ -185,6 +190,8 @@ export class App {
   private wantedText = false;
   /** Ctrl on the extra-keys bar: applies to the next key typed. */
   private ctrlArmed = false;
+  /** Files are being dragged over the page: show where they go. */
+  private dragging = false;
 
   private demo: DemoMode = 'off';
   private demoTimer: ReturnType<typeof setInterval> | null = null;
@@ -236,14 +243,23 @@ export class App {
       const plan = this.flash.plan;
       this.openMenu(
         'Release',
-        (plan.releases ?? []).map((r, i) => ({
-          label: `${r.tag}  ${r.date}${r.prerelease ? '  pre' : ''}${r.draft ? '  draft' : ''}`,
-          checked: i === plan.releaseIndex,
-          action: () => plan.selectRelease(i),
-        })),
+        [
+          // ● marks releases that carry esp-web-tool.json.
+          ...(plan.releases ?? []).map((r, i) => ({
+            label: `${manifestAsset(r) ? '●' : ' '} ${r.tag}  ${r.date}${r.prerelease ? '  pre' : ''}${r.draft ? '  draft' : ''}`,
+            checked: i === plan.releaseIndex,
+            action: () => plan.selectRelease(i),
+          })),
+          ...(plan.moreReleases
+            ? [{ label: '  Load more…', action: () => void plan.loadMoreReleases() }]
+            : []),
+        ],
         { within: this.rects.flash ?? undefined },
       );
     };
+    this.flash.onNotes = () => this.openNotes();
+    this.flash.onDownloads = () => this.openDownloads();
+    this.flash.parts.onDownloads = () => this.openDownloads();
     this.flash.set.onOpen = () => {
       const plan = this.flash.plan;
       this.openMenu(
@@ -297,6 +313,13 @@ export class App {
     this.pane = this.settings.ui.pane;
     this.zoomed = this.settings.ui.fullscreen;
     if (this.settings.ui.fontSize && this.fontSize) this.fontSize.set(this.settings.ui.fontSize);
+    const link = opts.link;
+    if (link?.baud) {
+      const i = BAUD_RATES.indexOf(link.baud as (typeof BAUD_RATES)[number]);
+      if (i >= 0) this.flash.baud.index = i;
+    }
+    if (link?.monitor) this.ports.baudRate = link.monitor;
+    if (link?.set) this.flash.plan.wantSet = link.set;
     if (opts.manifest) {
       this.useManifest(opts.manifest);
       this.planReady = true;
@@ -555,6 +578,12 @@ export class App {
       case 'D':
         this.openDump();
         return true;
+      case 'm':
+        this.openDownloads();
+        return true;
+      case 'n':
+        this.openNotes();
+        return true;
       case '?':
         this.overlay = { kind: 'help', scroll: 0 };
         return true;
@@ -592,6 +621,15 @@ export class App {
       else if (e.name === 'enter') {
         if (o.submit(o.input.value.trim())) this.overlay = null;
       } else o.input.handleKey(e);
+      return;
+    }
+    if (o.kind === 'notes') {
+      if (e.name === 'escape' || e.name === 'q' || e.name === 'enter' || e.name === 'n')
+        this.overlay = null;
+      else if (e.name === 'down' || e.name === 'j') o.scroll++;
+      else if (e.name === 'up' || e.name === 'k') o.scroll = Math.max(0, o.scroll - 1);
+      else if (e.name === 'pagedown' || e.name === ' ') o.scroll += 10;
+      else if (e.name === 'pageup') o.scroll = Math.max(0, o.scroll - 10);
       return;
     }
     if (o.kind === 'help') {
@@ -1033,6 +1071,74 @@ export class App {
       .finally(() => this.invalidate());
   }
 
+  /** `n`: the selected release's notes, as plain text. */
+  private openNotes(): void {
+    const r = this.flash.plan.release;
+    if (!r?.body.trim()) {
+      this.notify(r ? `${r.tag} has no release notes` : 'No release selected', 'info');
+      return;
+    }
+    this.overlay = {
+      kind: 'notes',
+      title: `${r.name || r.tag} · Esc to close`,
+      text: r.body,
+      scroll: 0,
+    };
+  }
+
+  /**
+   * `m`, manual assist (SPEC §7.4): GitHub release files can't be fetched by a page without
+   * the asset proxy. Each is a link that downloads it; then the files are dropped or picked
+   * and matched to their rows by name.
+   */
+  private openDownloads(): void {
+    const plan = this.flash.plan;
+    const list = plan.downloads;
+    if (!list.length) {
+      this.notify('Nothing to download by hand', 'info');
+      return;
+    }
+    this.openMenu(
+      `Download ${list.length === 1 ? 'this' : `these ${list.length}`}, then drop or pick`,
+      [
+        ...list.map((d) => ({
+          label: `↗ ${d.name}`,
+          action: () => {
+            this.openUrl(d.url);
+            this.openDownloads();
+          },
+        })),
+        { key: 'p', label: 'Pick the downloaded files…', action: () => this.pickDownloads() },
+      ],
+      { within: this.rects.flash ?? undefined },
+    );
+  }
+
+  /** Must run from input: the file picker needs the gesture. */
+  private pickDownloads(): void {
+    void this.flash.plan.browse(true).then((files) => {
+      if (files.length) this.takeFiles(files);
+    });
+  }
+
+  /** Dropped or picked files go to the plan (manual assist matches them by name). */
+  takeFiles(files: LocalFile[]): void {
+    void this.flash.plan.takeFiles(files).then(({ matched, added }) => {
+      const parts = [
+        matched && `${matched} matched by name`,
+        added && `${added} added as new part${added === 1 ? '' : 's'}`,
+      ].filter(Boolean);
+      this.notify(parts.join(', ') || 'No files', 'ok');
+      this.focusPane('flash');
+    });
+  }
+
+  /** Files are being dragged over the page (from the browser bridge). */
+  setDragging(over: boolean): void {
+    this.dragging = over;
+    this.invalidate();
+  }
+
   /** `-` / `+`: the terminal font size (phones have no Ctrl -/+), remembered per browser. */
   private changeFont(d: number): void {
     if (!this.fontSize) return;
@@ -1430,6 +1536,22 @@ export class App {
       ctx.cursor.visible = false; // no text cursor blinking through a dialog
       this.drawOverlay(ctx);
     }
+    if (this.dragging) {
+      const inner = dialog(ctx, 'Drop files', Math.min(W - 4, 62), 6, theme.accent);
+      const lines = [
+        'A manifest is loaded; parts are matched to rows by name,',
+        'other files are added as new parts.',
+      ];
+      lines.forEach((l, i) =>
+        screen.text(
+          inner.x + 2,
+          inner.y + 1 + i,
+          l,
+          { fg: theme.fg, bg: theme.inputBg },
+          inner.w - 3,
+        ),
+      );
+    }
   }
 
   /** Text that opens `url` when clicked, set into a border with a space each side. */
@@ -1751,6 +1873,28 @@ export class App {
     }
     if (o.kind === 'dump') {
       o.dialog.render(ctx, this.rects.flash ?? this.rects.main!);
+      return;
+    }
+    if (o.kind === 'notes') {
+      const w = Math.min(screen.cols - 4, 84);
+      const lines = wrap(o.text, w - 6);
+      const inner = dialog(ctx, o.title, w, Math.min(lines.length + 4, screen.rows - 2));
+      ctx.hits.add({ x: 0, y: 0, w: screen.cols, h: screen.rows }, (e) => {
+        if (e.action === 'wheelup') o.scroll = Math.max(0, o.scroll - 3);
+        else if (e.action === 'wheeldown') o.scroll += 3;
+        else if (e.action === 'down' && !contains(inner, e.x, e.y)) this.overlay = null;
+      });
+      const body = rows(inner, [1, { flex: 1 }, 1])[1]!;
+      o.scroll = Math.max(0, Math.min(o.scroll, lines.length - body.h));
+      lines.slice(o.scroll, o.scroll + body.h).forEach((l, i) => {
+        // Markdown headings stand out a little; the rest is shown as written.
+        const head = /^#{1,6}\s/.test(l);
+        screen.text(body.x + 2, body.y + i, l, {
+          fg: head ? theme.accent : theme.fg,
+          bg: theme.inputBg,
+          attrs: head ? Attr.Bold : 0,
+        });
+      });
       return;
     }
     if (o.kind === 'prompt') {

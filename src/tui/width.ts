@@ -127,3 +127,40 @@ export function padEnd(s: string, width: number): string {
   const t = truncate(s, width);
   return t + ' '.repeat(Math.max(0, width - stringWidth(t)));
 }
+
+/** Word-wrap `text` to `width` columns; long words are cut. Keeps blank lines. */
+export function wrap(text: string, width: number): string[] {
+  const out: string[] = [];
+  for (const para of text.replace(/\r\n?/g, '\n').split('\n')) {
+    let line = '';
+    for (const word of para.split(/(\s+)/)) {
+      if (!word) continue;
+      if (stringWidth(line + word) <= width) {
+        line += word;
+        continue;
+      }
+      if (line.trim()) out.push(line.trimEnd());
+      line = /^\s+$/.test(word) ? '' : word;
+      while (stringWidth(line) > width) {
+        const head = truncateExact(line, width);
+        out.push(head);
+        line = line.slice(head.length);
+      }
+    }
+    out.push(line.trimEnd());
+  }
+  return out;
+}
+
+/** The longest prefix of `s` that fits in `width` columns (no ellipsis). */
+function truncateExact(s: string, width: number): string {
+  let w = 0;
+  let i = 0;
+  for (const ch of s) {
+    const cw = charWidth(ch.codePointAt(0)!);
+    if (w + cw > width) break;
+    w += cw;
+    i += ch.length;
+  }
+  return s.slice(0, Math.max(1, i));
+}

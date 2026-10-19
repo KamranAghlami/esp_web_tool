@@ -212,6 +212,7 @@ A browser tab is a hostile terminal. Chrome **does not let pages intercept** `Ct
 | `i` | Chip info: reset into the bootloader, read the chip, reset back into the app |
 | `Enter` in the Manifest field | Load what it holds (URL, folder URL, GitHub repo); on an empty field, open the file picker |
 | `a` / `e` / `d` / `o` | Parts table: add a part / edit the row's offset and file in the part dialog (also `Enter`) / delete row / allow reading local files (the manifest's folder, or again after a reload). `Space` toggles a row |
+| `m` / `n` | Release files to download by hand (manual assist, §7.4) / the selected release's notes |
 | `Enter` on the Monitor pane | Enter the monitor: **from here every key goes to the device** |
 | `Ctrl+]` | Leave the monitor (back to hotkeys) |
 | `Ctrl+A` | Monitor menu: a centered pop-up that lists its keys and is clickable (live, or with the Monitor pane focused). `r` reset, `b` boot mode, `C` clear, `s` settings ▸ (`b` baud ▸ with Custom…, `f` format 8N1/8E1/7E1… ▸, `e` line ending ▸, `i` input raw/line ▸), `h` log-level colors, `t` timestamps, `d` lines ▸ (DTR, RTS by hand), `l` save log ▸ (plain, or with ANSI colors), `f` fullscreen, `Ctrl+A` send a literal `Ctrl+A`, `?` help. Menus open centered on the pane they belong to. Submenus have a `‹ Back` row; Esc and Backspace go back. Current values show in the menu labels and the status line (`303a:1001 @ 115200 8N1`), not in the pane header. |
@@ -365,11 +366,11 @@ These forms are accepted in the Manifest field (§5.2) and in the `?manifest=` /
 - `https://github.com/owner/repo/releases/latest` → preselects the latest release
 
 ### 7.2 Listing releases
-- `GET https://api.github.com/repos/{owner}/{repo}/releases?per_page=30`, paginated with "load more".
-- Each entry shows the tag, name, date, a `pre`/`draft` badge, and a manifest badge (●) if a recognized manifest asset exists.
+- `GET https://api.github.com/repos/{owner}/{repo}/releases?per_page=30`, paginated with "Load more…" (the last entry of the Release menu while a page comes back full).
+- Each entry shows the tag, date, a `pre`/`draft` badge, and ● when it has `esp-web-tool.json`.
 - Releases without any manifest are still selectable and fall back to the asset picker (§7.3, step 4).
-- The release body (markdown) is shown as plain text in a scrollable "Notes" box.
-- **Rate limit**: unauthenticated requests get 60/hour per IP. Cache responses in `sessionStorage` with ETag (a `304` does not count against the limit). Read `x-ratelimit-remaining`; when it reaches 0, show a reset countdown.
+- The release body (markdown) is shown as plain text in a scrollable "Notes" box: `n`, or ` Notes ` next to the Release picker. Headings stand out; nothing else is rendered.
+- **Rate limit**: unauthenticated requests get 60/hour per IP. As built, the browser's HTTP cache revalidates repeats with GitHub's ETag (a `304` does not count against the limit), so no cache of our own. When the limit is reached, the error says until when (`x-ratelimit-reset`).
 
 ### 7.3 Finding the manifest in a release
 Only the asset named `esp-web-tool.json` (decided 2026-10-18; the other formats are read only when named directly). None found → **asset picker** (later): list the `.bin` assets and use the same smart offsets as §5.2.
@@ -388,6 +389,12 @@ Browsers cannot download GitHub release assets directly (§2). The `fetcher` tri
 3. **Manual assist** (always available, needs no infrastructure): the tool shows the list of required files with normal download links (a click navigates, so CORS does not apply). The user then drops the downloaded files onto the tool. Files are matched by name, offsets come from the manifest, and `sha256` is checked when present.
 
 If no proxy is configured, the UI goes straight to Manual assist and explains why in one line.
+
+**Manual assist as built (M3, 2026-10-19)**:
+- A release's manifest that can't be fetched: the status line says `↓ v1: download esp-web-tool.json, then drop it here (m)`. Once that file is dropped or picked, it **stands for the release**: the field keeps `owner/repo`, the release picker stays, and its parts resolve to the release's download URLs.
+- Parts that can't be fetched are red: `download it, then drop it here (m)`. A notice above the table says the same and opens the list.
+- `m` (or a click on the status line or the notice) opens a menu: one `↗ name` link per file (it opens the download in a new tab) and `Pick the downloaded files…`.
+- **Dropping files** anywhere on the page does the same as picking them (`src/browser/drop.ts`; Chrome's dropped files carry handles, so they are kept across reloads like picked ones). A "Drop files" box shows while dragging. Matching: the pending manifest first, then each file to the row whose path has that file name (sha256 is still checked, and locked rows can be filled this way), and anything else becomes a new part. A lone `.json` loads as the manifest.
 
 **How existing web flashers handle this** (checked 2026-10-17):
 - **T-SDR-C5** (`kamranaghlami.github.io/T-SDR-C5`): no proxy. Its CI runs `gh release download` for every release and copies the binaries into the Pages site, along with `versions.json` and `manifests/<tag>.json`. The page then fetches everything **same-origin**. The cost is that the firmware repo has to cooperate and redeploy its Pages on each release.
@@ -443,7 +450,7 @@ There is a single `PortManager`. Only one consumer holds the port at a time.
 
 Query parameters (they can be combined):
 - `?manifest=<anything the Manifest field accepts>` (§5.2), loaded on open; `?repo=owner/repo` is an alias
-- `&tag=v1.2.0` or `&tag=latest`
+- `&tag=v1.2.0` or `&tag=latest` (with an `owner/repo`)
 - `&set=esp32s3-8mb` — preselect the set (if it matches the chip, flashing is one `Ctrl+F` away)
 - `&baud=921600&monitor=115200`
 - `?demo` or `?demo=flood`: a synthetic ESP-IDF log stream in the monitor, for trying it without a device (`flood` is about a saturated 2 Mbaud link; the e2e throughput test uses it). No key starts it.
@@ -495,7 +502,7 @@ Settings live in `localStorage`, so every browser (each computer or phone) keeps
 | M1 ✅ | The Manifest field (local file + folder grant, URL, folder URL, GitHub release listing), manifest parser + adapters, editable parts table with red rows and locks, `?manifest=`; esptool-js: chip info (`i`), validation, flash/verify/reset (`F`), erase (`E`), dump to a file (`D`), stop (`Esc`). Tested end to end against a simulated ESP32-S3 (§13); **needs a hardware run** | A local IDF build flashes onto ESP32 and ESP32-S3 |
 | M2 ✅ | Serial monitor, port handoff, native-USB reconnect; timestamps, line input, DTR/RTS, custom baud, save log; focus moves to the monitor after a flash with Reset after. **Needs a hardware run** | Flash → auto-monitor works on a native-USB chip |
 | M2b ✅ | **Phones**: compact size class, touch bridge, extra-keys bar, soft-keyboard handling, WebUSB + `web-serial-polyfill` fallback (plus CH340), Android device emulation in e2e. **Needs a real phone** | Flash + monitor a native-USB ESP32 from an Android phone over OTG |
-| M3 | GitHub release files through the asset proxy (once the rate limit is settled), Manual assist download, release notes | A real release with `esp-web-tool.json` flashes via manual assist |
+| M3 | GitHub release files through the asset proxy (once the rate limit is settled; **not started**). Done 2026-10-19: manual assist (download links, drop or pick, matched by name), drag and drop, release notes, ● and Load more in the release list, `&tag/&set/&baud/&monitor` deep links | A real release with `esp-web-tool.json` flashes via manual assist |
 | M4 | Proxy hardening (caching, limits) and self-hosting docs, JSON Schema, producer workflow docs | One-click flash from a release link |
 | M5 | Polish: light theme, log save, error hints, accessibility pass, installable app (PWA) | — |
 

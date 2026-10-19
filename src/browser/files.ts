@@ -40,7 +40,7 @@ async function guarded<T>(read: () => Promise<T>): Promise<T> {
   }
 }
 
-const fromHandle = (handle: FileSystemFileHandle): LocalFile => ({
+export const fromHandle = (handle: FileSystemFileHandle): LocalFile => ({
   name: handle.name,
   handle,
   read: () => guarded(async () => new Uint8Array(await (await handle.getFile()).arrayBuffer())),
@@ -49,7 +49,7 @@ const fromHandle = (handle: FileSystemFileHandle): LocalFile => ({
 const isHandle = (h: unknown, kind: FileSystemHandleKind): boolean =>
   typeof FileSystemHandle !== 'undefined' && h instanceof FileSystemHandle && h.kind === kind;
 
-const fromFile = (file: File): LocalFile => ({
+export const fromFile = (file: File): LocalFile => ({
   name: file.name,
   read: async () => new Uint8Array(await file.arrayBuffer()),
 });

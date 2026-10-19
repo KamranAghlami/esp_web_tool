@@ -10,6 +10,7 @@ import { WebglAddon } from '@xterm/addon-webgl';
 import { Terminal } from '@xterm/xterm';
 import { App, type DemoMode } from './app/app';
 import { browserFiles } from './browser/files';
+import { attachDrop } from './browser/drop';
 import { indexedDbStore } from './browser/plan-store';
 import { attachTouch, isTouchDevice } from './browser/touch';
 import { UsbSerial } from './browser/usb-serial';
@@ -53,10 +54,27 @@ async function copyText(text: string, refocus: () => void): Promise<void> {
   }
 }
 
-/** `?manifest=` (or `?repo=`) fills the Manifest field and loads it. */
+/**
+ * `?manifest=` (or `?repo=`) fills the Manifest field and loads it; `&tag=` picks a release
+ * of an `owner/repo` (SPEC §10).
+ */
 function manifestFromUrl(): string | undefined {
   const q = new URLSearchParams(location.search);
-  return q.get('manifest') ?? q.get('repo') ?? undefined;
+  const value = q.get('manifest') ?? q.get('repo') ?? undefined;
+  const tag = q.get('tag');
+  if (value && tag && tag !== 'latest' && /^[\w-]+\/[\w.-]+$/.test(value.trim()))
+    return `https://github.com/${value.trim()}/releases/tag/${encodeURIComponent(tag)}`;
+  return value;
+}
+
+/** `&set=`, `&baud=`, `&monitor=`: preselect a set, and the flash and monitor baud. */
+function linkFromUrl() {
+  const q = new URLSearchParams(location.search);
+  const num = (k: string) => {
+    const n = Number(q.get(k));
+    return Number.isInteger(n) && n >= 300 && n <= 10_000_000 ? n : undefined;
+  };
+  return { set: q.get('set') ?? undefined, baud: num('baud'), monitor: num('monitor') };
 }
 
 /** `?demo` starts the synthetic log stream, `?demo=flood` at about 2 Mbaud. */
@@ -186,6 +204,7 @@ async function main(): Promise<void> {
     files: browserFiles,
     assetProxy: import.meta.env.VITE_ASSET_PROXY as string | undefined,
     manifest: manifestFromUrl(),
+    link: linkFromUrl(),
     serial: serialProvider(),
     touch,
     // The soft keyboard is xterm's textarea having focus.
@@ -199,6 +218,11 @@ async function main(): Promise<void> {
     },
   });
   attachTouch(host, term, (data) => app.input(data));
+  attachDrop(
+    document.body,
+    (files) => app.takeFiles(files),
+    (over) => app.setDragging(over),
+  );
   app.start();
   // On a phone, focusing would pop the keyboard up; the app asks for it when needed.
   if (!touch) term.focus();

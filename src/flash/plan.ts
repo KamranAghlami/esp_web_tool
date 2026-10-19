@@ -1,4 +1,11 @@
-import { defaultRelease, listReleases, manifestAsset, type Release, viaProxy } from './github';
+import {
+  defaultRelease,
+  listReleases,
+  manifestAsset,
+  RELEASES_PER_PAGE,
+  type Release,
+  viaProxy,
+} from './github';
 import { AccessError, FetchError, type FileHost, type LocalFile, type LocalFolder } from './host';
 import { classify } from './locate';
 import {
@@ -31,9 +38,18 @@ export interface PlanRow {
   loading: boolean;
   /** Why the file can't be used; red in the table, and flashing is refused. */
   error: string | null;
+  /** Where to download it by hand when it can't be fetched (manual assist, SPEC §7.4). */
+  download?: string;
 }
 
-export type PlanStatus = { kind: 'idle' | 'loading' | 'ok' | 'error'; text: string };
+/** `manual`: the manifest must be downloaded by hand (no asset proxy). */
+export type PlanStatus = { kind: 'idle' | 'loading' | 'ok' | 'error' | 'manual'; text: string };
+
+/** A file to download by hand and then drop or pick (manual assist, SPEC §7.4). */
+export interface Download {
+  name: string;
+  url: string;
+}
 
 /** A new or edited part's source: a typed path or URL, or a picked file. */
 export type PartSource = { path: string } | { file: LocalFile };
@@ -53,6 +69,7 @@ export interface SavedPlan {
   releases: Release[] | null;
   releaseIndex: number;
   status: PlanStatus;
+  pendingManifest?: Download | null;
   rows: {
     enabled: boolean;
     offset: number;
@@ -74,6 +91,7 @@ type Base =
 const NEEDS_FOLDER = 'needs folder access (o)';
 const NEEDS_ACCESS = 'needs permission again (o)';
 const NOT_KEPT = 'not kept after reload: pick it again (e)';
+const MANUAL = 'download it, then drop it here (m)';
 const baseName = (p: string) => p.split(/[\\/]/).pop() || p;
 const decoder = new TextDecoder();
 
@@ -113,9 +131,15 @@ export class FlashPlan {
   setIndex = 0;
   releases: Release[] | null = null;
   releaseIndex = -1;
+  /** The listed repo, for loading more releases. */
+  private repo: { owner: string; repo: string } | null = null;
   status: PlanStatus = { kind: 'idle', text: '' };
   /** The picked manifest file's name, shown in the field while it is the source. */
   localName: string | null = null;
+  /** A set id to select when a manifest loads (the `&set=` deep link), used once. */
+  wantSet: string | null = null;
+  /** A release's manifest that has to be downloaded by hand first (no asset proxy). */
+  pendingManifest: Download | null = null;
   /** Called when a set becomes active, so the pane can take its baud and erase settings. */
   onSet?: (set: PlanSet) => void;
   /** Called with a picked manifest file's name once it loaded, for the field to show. */
@@ -142,6 +166,14 @@ export class FlashPlan {
     return this.releases?.[this.releaseIndex] ?? null;
   }
 
+  /** Everything waiting to be downloaded by hand: the manifest, or red parts (SPEC §7.4). */
+  get downloads(): Download[] {
+    if (this.pendingManifest) return [this.pendingManifest];
+    return this.rows.flatMap((r) =>
+      r.error === MANUAL && r.download ? [{ name: baseName(r.download), url: r.download }] : [],
+    );
+  }
+
   /**
    * What `o` would grant: the folder of a local manifest (its relative parts can't be read
    * until then), or permission again for files and folders kept across a reload.
@@ -166,6 +198,7 @@ export class FlashPlan {
     const target = classify(text);
     this.localName = null;
     this.releases = null;
+    this.pendingManifest = null;
     if (!target) {
       this.clearManifest();
       this.setStatus('error', `Not a URL or owner/repo: ${text.trim()}`);
@@ -182,6 +215,7 @@ export class FlashPlan {
       }
       if (gen !== this.gen) return;
       this.releases = releases;
+      this.repo = { owner: target.owner, repo: target.repo };
       const i = defaultRelease(releases, target.tag);
       if (i < 0) return this.fail(`${target.owner}/${target.repo} has no releases`);
       await this.loadRelease(i, gen);
@@ -195,6 +229,24 @@ export class FlashPlan {
       if (gen === this.gen) this.apply(m, { kind: 'url', url });
     } catch (err) {
       if (gen === this.gen) this.fail(`${baseName(new URL(url).pathname)}: ${message(err)}`);
+    }
+  }
+
+  /** A full page was listed, so there may be older releases. */
+  get moreReleases(): boolean {
+    return (this.releases?.length ?? 0) % RELEASES_PER_PAGE === 0 && this.releases!.length > 0;
+  }
+
+  /** The next page of releases, appended to the list. */
+  async loadMoreReleases(): Promise<void> {
+    if (!this.releases || !this.repo) return;
+    const page = this.releases.length / RELEASES_PER_PAGE + 1;
+    try {
+      const more = await listReleases(this.host, this.repo.owner, this.repo.repo, page);
+      this.releases.push(...more);
+      this.onChange();
+    } catch (err) {
+      this.fail(`GitHub: ${message(err)}`);
     }
   }
 
@@ -214,11 +266,12 @@ export class FlashPlan {
     }
     const url = viaProxy(asset.url, this.proxy);
     if (!url) {
+      // No proxy: the manifest is downloaded by hand and dropped or picked (manual assist).
       this.clearManifest();
-      return this.fail(
-        `Release ${r.tag} has ${asset.name}, but GitHub release files need the asset proxy (not set up yet)`,
-      );
+      this.pendingManifest = { name: asset.name, url: asset.url };
+      return this.setStatus('manual', `${r.tag}: download ${asset.name}, then drop it here (m)`);
     }
+    this.pendingManifest = null;
     this.setStatus('loading', `Reading ${asset.name} from ${r.tag}…`);
     try {
       const m = parseManifest(decoder.decode(await this.host.fetchBytes(url)));
@@ -238,17 +291,59 @@ export class FlashPlan {
 
   async loadFile(file: LocalFile): Promise<void> {
     const gen = ++this.gen;
-    this.releases = null;
+    // A release's manifest downloaded by hand stands for that release: its parts are still
+    // the release's files (to download by hand too), and the field keeps the repo.
+    const pending = this.pendingManifest;
+    const fromRelease = pending !== null && file.name === pending.name;
+    if (!fromRelease) this.releases = null;
     this.setStatus('loading', `Reading ${file.name}…`);
     try {
       const m = parseManifest(decoder.decode(await file.read()));
       if (gen !== this.gen) return;
+      this.pendingManifest = null;
+      if (fromRelease) {
+        this.apply(m, { kind: 'url', url: pending.url });
+        return;
+      }
       this.localName = file.name;
       this.onFile?.(file.name);
       this.apply(m, { kind: 'file', file, folder: null });
     } catch (err) {
       if (gen === this.gen) this.fail(`${file.name}: ${message(err)}`);
     }
+  }
+
+  /**
+   * Files the user dropped or picked (manual assist, SPEC §7.4): the release's manifest
+   * first, then parts matched to rows by file name (sha256 still checked); anything else is
+   * added as a new part, and another `.json` loads as the manifest.
+   */
+  async takeFiles(files: LocalFile[]): Promise<{ matched: number; added: number }> {
+    let rest = files;
+    const manifest =
+      files.find((f) => f.name === this.pendingManifest?.name) ??
+      (files.length === 1 && /\.json$/i.test(files[0]!.name) ? files[0] : undefined);
+    if (manifest) {
+      await this.loadFile(manifest);
+      rest = files.filter((f) => f !== manifest);
+    }
+    let matched = manifest ? 1 : 0;
+    let added = 0;
+    for (const file of rest) {
+      const row = this.rows.find(
+        (r) => !r.data && !r.file && r.path !== null && baseName(r.path) === file.name,
+      );
+      if (row) {
+        row.file = file;
+        this.readRow(row);
+        matched++;
+      } else {
+        this.addPart({ file }, null);
+        added++;
+      }
+    }
+    this.onChange();
+    return { matched, added };
   }
 
   /** Re-read the current source (Enter on an unchanged field). */
@@ -287,7 +382,9 @@ export class FlashPlan {
   private apply(m: Manifest, base: Base): void {
     this.manifest = m;
     this.base = base;
-    this.setIndex = 0;
+    const wanted = this.wantSet ? m.sets.findIndex((s) => s.id === this.wantSet) : -1;
+    this.wantSet = null;
+    this.setIndex = Math.max(0, wanted);
     this.useSet();
   }
 
@@ -334,6 +431,7 @@ export class FlashPlan {
   /** Read a row's data from its file or path; the row turns red if it can't be. */
   private readRow(row: PlanRow): void {
     const fail = (why: string) => this.settle(row, Promise.reject(new FetchError(why)));
+    row.download = undefined;
     if (row.file) return this.settle(row, row.file.read());
     if (row.path === null) return fail(NOT_KEPT);
     const base = this.base;
@@ -344,7 +442,10 @@ export class FlashPlan {
       return folder ? this.settle(row, folder.read(at.local)) : fail(NEEDS_FOLDER);
     }
     const url = new URL(at.url).hostname === 'github.com' ? viaProxy(at.url, this.proxy) : at.url;
-    if (!url) return fail('needs the asset proxy');
+    if (!url) {
+      row.download = at.url;
+      return fail(MANUAL);
+    }
     this.settle(row, this.host.fetchBytes(url));
   }
 
@@ -449,6 +550,7 @@ export class FlashPlan {
       releases: this.releases,
       releaseIndex: this.releaseIndex,
       status: this.status,
+      pendingManifest: this.pendingManifest,
       rows: this.rows.map((r) => ({
         enabled: r.enabled,
         offset: r.offset,
@@ -475,6 +577,7 @@ export class FlashPlan {
     this.releases = saved.releases;
     this.releaseIndex = saved.releaseIndex;
     this.status = saved.status.kind === 'loading' ? { kind: 'idle', text: '' } : saved.status;
+    this.pendingManifest = saved.pendingManifest ?? null;
     this.localName = b?.kind === 'file' ? b.name : null;
     this.base =
       b?.kind === 'url'

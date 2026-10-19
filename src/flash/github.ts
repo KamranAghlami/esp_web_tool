@@ -8,16 +8,26 @@ export interface Release {
   draft: boolean;
   prerelease: boolean;
   date: string;
+  /** Release notes (markdown), shown as plain text. */
+  body: string;
   assets: { name: string; url: string; size: number }[];
 }
 
+/** Releases per page of the listing; a full page means there may be more. */
+export const RELEASES_PER_PAGE = 30;
+
+/**
+ * One page of a repo's releases, newest first. The browser's HTTP cache revalidates repeats
+ * with the ETag GitHub sends, and a 304 doesn't count against the 60/hour limit (SPEC §7.2).
+ */
 export async function listReleases(
   host: FileHost,
   owner: string,
   repo: string,
+  page = 1,
 ): Promise<Release[]> {
   const raw = await host.fetchJson(
-    `https://api.github.com/repos/${owner}/${repo}/releases?per_page=30`,
+    `https://api.github.com/repos/${owner}/${repo}/releases?per_page=${RELEASES_PER_PAGE}&page=${page}`,
   );
   if (!Array.isArray(raw)) throw new FetchError('unexpected answer from GitHub');
   return raw.map((r: Record<string, unknown>) => ({
@@ -26,6 +36,7 @@ export async function listReleases(
     draft: r.draft === true,
     prerelease: r.prerelease === true,
     date: String(r.published_at ?? '').slice(0, 10),
+    body: String(r.body ?? ''),
     assets: (Array.isArray(r.assets) ? r.assets : []).map((a: Record<string, unknown>) => ({
       name: String(a.name ?? ''),
       url: String(a.browser_download_url ?? ''),

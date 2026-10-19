@@ -4,11 +4,14 @@ import { expectOnScreen, openApp, screenText } from './harness';
 /** The compact layout and touch input on an emulated Pixel 7 (SPEC §4.1). */
 test.use({ ...devices['Pixel 7'] });
 
-/** Tap the terminal cell where `text` is shown (its first character, plus `dx`). */
+/**
+ * Tap the terminal cell where `text` is shown (its first character, plus `dx`). The lowest
+ * match wins: key labels live in the bottom rows.
+ */
 async function tapText(page: Page, text: string, dx = 0): Promise<void> {
   await expectOnScreen(page, text);
   const lines = await screenText(page);
-  const row = lines.findIndex((l) => l.includes(text));
+  const row = lines.findLastIndex((l) => l.includes(text));
   const col = lines[row]!.indexOf(text) + dx;
   const p = await page.evaluate(
     ({ col, row }) => {
@@ -50,6 +53,9 @@ test.describe('phone', () => {
     await tapText(page, '^A');
     await expectOnScreen(page, 'Monitor · Ctrl-A');
     await tapText(page, 'Esc');
+    await expect
+      .poll(async () => (await screenText(page)).join('\n'))
+      .not.toContain('Monitor · Ctrl-A');
     await tapText(page, 'Ctrl');
     await page.keyboard.type('c'); // Ctrl armed: this is ^C
     await expect.poll(() => page.evaluate(() => (window as any).__serialWritten)).toBe('\x03');
