@@ -287,7 +287,8 @@ test.describe('app', () => {
     await page.keyboard.press('f'); // monitor fullscreen
     await page.reload();
     await expectOnScreen(page, '2 Monitor');
-    expect((await screenText(page)).join()).not.toContain('1 Flash');
+    // Fullscreen monitor: the Flash pane (its Parts panel) isn't drawn, only its tab.
+    expect((await screenText(page)).join()).not.toContain('Parts');
     await page.keyboard.press('f');
     await expectOnScreen(page, 'espressif/esp-idf');
     await page.keyboard.press('Control+a');
@@ -477,10 +478,13 @@ test.describe('app', () => {
   });
 
   test('f toggles fullscreen and F starts a flash', async ({ page }) => {
+    // Fullscreen: one pane, the other is only a tab (its placeholder text is gone).
     await page.keyboard.press('f');
-    await expect.poll(async () => (await screenText(page)).join()).not.toContain('2 Monitor');
+    await expect
+      .poll(async () => (await screenText(page)).join())
+      .not.toContain('No device connected');
     await page.keyboard.press('f');
-    await expectOnScreen(page, '2 Monitor');
+    await expectOnScreen(page, 'No device connected');
     await page.keyboard.press('F');
     await expectOnScreen(page, 'No parts to flash');
   });
@@ -531,7 +535,8 @@ test.describe('app', () => {
     await expectOnScreen(page, 'Flash');
     await page.keyboard.press('2');
     await expectOnScreen(page, 'No device connected');
-    await page.setViewportSize({ width: 400, height: 300 });
+    // Phones are fine down to 40×14; below that, a notice.
+    await page.setViewportSize({ width: 300, height: 200 });
     await expectOnScreen(page, 'Terminal too small');
   });
 

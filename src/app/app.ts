@@ -6,6 +6,7 @@ import {
   FORMATS,
   PortManager,
   type PortState,
+  type SerialProvider,
 } from '../serial/port-manager';
 import { InputParser, type InputEvent, type KeyEvent, type PasteEvent } from '../tty/input';
 import type { Tty } from '../tty/tty';
@@ -46,10 +47,29 @@ import {
   type ValueStore,
 } from './settings';
 
-export const MIN_COLS = 80;
-export const MIN_ROWS = 24;
+/** Smallest usable terminal (a phone in portrait is about 48×40; SPEC §3, §4.1). */
+export const MIN_COLS = 40;
+export const MIN_ROWS = 14;
+/** Below this width the layout is compact: short status line, fewer hints, no size column. */
+export const COMPACT_COLS = 80;
 /** Below this width the panes are shown one at a time. */
 export const SPLIT_COLS = 120;
+
+/** The extra-keys bar on touch devices (SPEC §4.1): label, and the bytes it types. */
+const EXTRA_KEYS: [string, string][] = [
+  ['Esc', '\x1b'],
+  ['Tab', '\t'],
+  ['Ctrl', ''],
+  ['←', '\x1b[D'],
+  ['↓', '\x1b[B'],
+  ['↑', '\x1b[A'],
+  ['→', '\x1b[C'],
+  ['^A', '\x01'],
+  ['^]', '\x1d'],
+  ['kbd', ''],
+  ['A-', ''],
+  ['A+', ''],
+];
 
 export const REPO_URL = 'https://github.com/KamranAghlami/esp_web_tool';
 /** Monitor baud choices: slow ROM/legacy rates, then the flasher's. */
@@ -95,6 +115,14 @@ export interface AppOptions {
   storage?: KeyValueStore;
   /** Where the flash plan (with file handles) is kept per device: IndexedDB in the page. */
   plans?: ValueStore;
+  /** navigator.serial, or the WebUSB stand-in on phones; null: neither (unsupported). */
+  serial?: SerialProvider | null;
+  /** A touch device: the extra-keys bar is shown and the soft keyboard follows text focus. */
+  touch?: boolean;
+  /** Shows or hides the soft keyboard (focuses or blurs xterm's textarea). */
+  keyboard?: (show: boolean) => void;
+  /** The terminal's font size, changed with `-` / `+` and remembered per browser. */
+  fontSize?: { get(): number; set(px: number): void };
   /** File pickers, folder access and fetch for the flash plan (`src/browser/files.ts`). */
   files: FileHost;
   /** Asset proxy base URL for GitHub release files (SPEC §7.4); none until it exists. */
@@ -149,6 +177,14 @@ export class App {
   /** Plans are saved only once the remembered one was restored (or there was none). */
   private planReady = false;
   private planTimer: ReturnType<typeof setTimeout> | null = null;
+  private touch: boolean;
+  private keyboard?: (show: boolean) => void;
+  private fontSize?: AppOptions['fontSize'];
+  /** Whether the soft keyboard was last asked to show (touch devices only). */
+  private keyboardShown = false;
+  private wantedText = false;
+  /** Ctrl on the extra-keys bar: applies to the next key typed. */
+  private ctrlArmed = false;
 
   private demo: DemoMode = 'off';
   private demoTimer: ReturnType<typeof setInterval> | null = null;
@@ -170,6 +206,9 @@ export class App {
     this.copy = opts.copy ?? (() => Promise.resolve());
     this.plans = opts.plans;
     this.files = opts.files;
+    this.touch = opts.touch ?? false;
+    this.keyboard = opts.keyboard;
+    this.fontSize = opts.fontSize;
     this.flash = new FlashPane(
       opts.files,
       () => {
@@ -234,10 +273,13 @@ export class App {
         })),
         { within: this.rects.flash ?? undefined },
       );
-    this.ports = new PortManager({
-      onData: (bytes) => this.monitor.write(bytes, () => this.invalidate()),
-      onState: (s, detail) => this.onPortState(s, detail),
-    });
+    this.ports = new PortManager(
+      {
+        onData: (bytes) => this.monitor.write(bytes, () => this.invalidate()),
+        onState: (s, detail) => this.onPortState(s, detail),
+      },
+      opts.serial,
+    );
     this.jobs = new JobRunner({
       ports: this.ports,
       // esptool's per-block "Writing at 0x…" lines would flood the monitor; the bar shows that.
@@ -254,6 +296,7 @@ export class App {
     this.applySettings(this.settings.last);
     this.pane = this.settings.ui.pane;
     this.zoomed = this.settings.ui.fullscreen;
+    if (this.settings.ui.fontSize && this.fontSize) this.fontSize.set(this.settings.ui.fontSize);
     if (opts.manifest) {
       this.useManifest(opts.manifest);
       this.planReady = true;
@@ -303,7 +346,19 @@ export class App {
   // -------------------------------------------------------------------------
   // Input
 
+  /** Input from outside the terminal's own stream: touch, the extra-keys bar. */
+  input(data: string): void {
+    this.onData(data);
+  }
+
   private onData(data: string): void {
+    // Sticky Ctrl from the extra-keys bar turns the next typed letter into its control code.
+    if (this.ctrlArmed && [...data].length === 1) {
+      const c = data.toLowerCase().charCodeAt(0);
+      if (c >= 0x61 && c <= 0x7a) data = String.fromCharCode(c - 0x60);
+      else if ('@[\\]^_'.includes(data)) data = String.fromCharCode(data.charCodeAt(0) - 0x40);
+      this.ctrlArmed = false;
+    }
     for (const e of this.parser.feed(data)) {
       // The next key puts the hints back (a message it causes replaces them again).
       if (e.type === 'key') this.message = null;
@@ -402,7 +457,11 @@ export class App {
   private saveSettings(): void {
     const s = this.settings;
     s.last = this.snapshot();
-    s.ui = { pane: this.pane, fullscreen: this.zoomed };
+    s.ui = {
+      pane: this.pane,
+      fullscreen: this.zoomed,
+      fontSize: this.settings.ui.fontSize,
+    };
     const key = this.ports.port && portKey(this.ports.port);
     if (key && this.ports.state === 'open') rememberDevice(s.devices, key, s.last);
     this.store.save(s);
@@ -499,6 +558,11 @@ export class App {
       case '?':
         this.overlay = { kind: 'help', scroll: 0 };
         return true;
+      case '-':
+      case '+':
+      case '=':
+        this.changeFont(e.name === '-' ? -1 : 1);
+        return true;
       case 'enter':
         if (this.pane === 'monitor') {
           this.enterLive();
@@ -538,7 +602,7 @@ export class App {
       else if (e.name === 'pagedown' || e.name === ' ') o.scroll += 10;
       else if (e.name === 'pageup') o.scroll = Math.max(0, o.scroll - 10);
       else if (e.name === 'G' || e.name === 'end')
-        o.scroll = HELP.length; // clamped when drawn
+        o.scroll = 1e6; // clamped when drawn
       else if (e.name === 'g' || e.name === 'home') o.scroll = 0;
       return;
     }
@@ -969,6 +1033,15 @@ export class App {
       .finally(() => this.invalidate());
   }
 
+  /** `-` / `+`: the terminal font size (phones have no Ctrl -/+), remembered per browser. */
+  private changeFont(d: number): void {
+    if (!this.fontSize) return;
+    const px = Math.max(8, Math.min(28, this.fontSize.get() + d));
+    this.fontSize.set(px);
+    this.settings.ui.fontSize = px;
+    this.notify(`Font ${px}px`, 'info');
+  }
+
   /** The flasher needs the port open in the monitor first; it borrows it from there. */
   private needPort(): boolean {
     if (this.ports.state === 'open') return true;
@@ -1234,6 +1307,24 @@ export class App {
 
     this.tty.write(this.renderer.render(screen, cursor));
     this.frames++;
+    this.syncKeyboard();
+  }
+
+  /** Something on screen takes typed text: a text field, a dialog's field, the live monitor. */
+  private wantsText(): boolean {
+    const o = this.overlay;
+    if (o) return o.kind === 'part' || o.kind === 'dump' || o.kind === 'prompt';
+    return this.monitor.live || (this.focused()?.capturesText ?? false);
+  }
+
+  /** On touch devices the soft keyboard comes up only when text is wanted (SPEC §4.1). */
+  private syncKeyboard(): void {
+    if (!this.touch || !this.keyboard) return;
+    const want = this.wantsText();
+    if (want === this.wantedText) return;
+    this.wantedText = want;
+    this.keyboardShown = want;
+    this.keyboard(want);
   }
 
   private drawTooSmall(ctx: Ctx): void {
@@ -1257,23 +1348,27 @@ export class App {
     const W = screen.cols;
     const H = screen.rows;
     const border = { fg: theme.border };
+    const compact = W < COMPACT_COLS;
+    // Below the separator: the key bar, and on touch devices the extra-keys bar too.
+    const below = this.touch ? 2 : 1;
+    const sep = H - 2 - below;
 
     // Frame: title, status, pane header, panes, separator, key bar, bottom.
     screen.box({ x: 0, y: 0, w: W, h: H }, border);
     this.link(ctx, 2, 0, 'ESP Web Tool', REPO_URL, { fg: theme.title, attrs: Attr.Bold });
-    const ver = `v${__APP_VERSION__} · ${__GIT_SHA__}`;
+    const ver = compact ? `v${__APP_VERSION__}` : `v${__APP_VERSION__} · ${__GIT_SHA__}`;
     const release = `${REPO_URL}/releases/tag/v${__APP_VERSION__}`;
     this.link(ctx, W - 3 - stringWidth(ver), 0, ver, release, { fg: theme.dim });
-    this.drawStatus(ctx, { x: 2, y: 1, w: W - 4, h: 1 });
+    this.drawStatus(ctx, { x: 2, y: 1, w: W - 4, h: 1 }, compact);
 
-    const main: Rect = { x: 1, y: 3, w: W - 2, h: H - 6 };
+    const main: Rect = { x: 1, y: 3, w: W - 2, h: sep - 3 };
     const split = W >= SPLIT_COLS && !this.zoomed;
     screen.text(0, 2, '├', border);
     screen.hline(1, 2, W - 2, '─', border);
     screen.text(W - 1, 2, '┤', border);
-    screen.text(0, H - 3, '├', border);
-    screen.hline(1, H - 3, W - 2, '─', border);
-    screen.text(W - 1, H - 3, '┤', border);
+    screen.text(0, sep, '├', border);
+    screen.hline(1, sep, W - 2, '─', border);
+    screen.text(W - 1, sep, '┤', border);
 
     // Clicking anywhere in a pane focuses it; widget hits drawn later take precedence.
     let flashRect: Rect | null = null;
@@ -1285,7 +1380,7 @@ export class App {
       monRect = rr!;
       screen.text(l!.x + l!.w, 2, '┬', border);
       screen.vline(l!.x + l!.w, main.y, main.h, '│', border);
-      screen.text(l!.x + l!.w, H - 3, '┴', border);
+      screen.text(l!.x + l!.w, sep, '┴', border);
     } else if (this.pane === 'flash') {
       flashRect = main;
     } else {
@@ -1294,8 +1389,19 @@ export class App {
 
     this.rects = { main, flash: flashRect, monitor: monRect };
     const focus = this.focused();
+    if (!split) {
+      // One pane at a time: both titles show, as tabs; the hidden one is a click away.
+      const fx = this.paneTitle(ctx, main.x, 'Flash', this.pane === 'flash', '1');
+      const mx = this.paneTitle(ctx, fx, 'Monitor', this.pane === 'monitor', '2');
+      ctx.hits.add({ x: main.x + 1, y: 2, w: fx - main.x - 1, h: 1 }, (e) => {
+        if (e.action === 'down') this.focusPane('flash');
+      });
+      ctx.hits.add({ x: fx + 1, y: 2, w: mx - fx - 1, h: 1 }, (e) => {
+        if (e.action === 'down') this.focusPane('monitor');
+      });
+    }
     if (flashRect) {
-      this.paneTitle(ctx, flashRect.x, 'Flash', this.pane === 'flash', '1');
+      if (split) this.paneTitle(ctx, flashRect.x, 'Flash', this.pane === 'flash', '1');
       ctx.hits.add(flashRect, (e) => e.action === 'down' && this.focusPane('flash'));
       screen.withClip(flashRect, () =>
         this.flash.render(ctx, flashRect!, this.pane === 'flash' ? focus : null),
@@ -1303,22 +1409,23 @@ export class App {
     }
     if (monRect) {
       const live = this.monitor.live;
-      const title = 'Monitor';
-      this.paneTitle(
-        ctx,
-        monRect.x,
-        title,
-        this.pane === 'monitor',
-        '2',
-        live ? theme.borderLive : undefined,
-      );
+      if (split)
+        this.paneTitle(
+          ctx,
+          monRect.x,
+          'Monitor',
+          this.pane === 'monitor',
+          '2',
+          live ? theme.borderLive : undefined,
+        );
       ctx.hits.add(monRect, (e) => e.action === 'down' && this.focusPane('monitor'));
       screen.withClip(monRect, () => this.monitor.render(ctx, monRect!));
     }
 
-    const bar = { x: 2, y: H - 2, w: W - 4, h: 1 };
+    const bar = { x: 2, y: sep + 1, w: W - 4, h: 1 };
     if (this.message && this.message.until > ctx.now) this.drawMessage(ctx, bar, this.message);
-    else keyBar(ctx, bar, this.hints());
+    else keyBar(ctx, bar, compact ? this.compactHints() : this.hints());
+    if (this.touch) this.drawExtraKeys(ctx, { x: 1, y: sep + 2, w: W - 2, h: 1 });
     if (this.overlay) {
       ctx.cursor.visible = false; // no text cursor blinking through a dialog
       this.drawOverlay(ctx);
@@ -1355,7 +1462,11 @@ export class App {
     return cx;
   }
 
-  private drawStatus(ctx: Ctx, r: Rect): void {
+  private drawStatus(ctx: Ctx, r: Rect, compact: boolean): void {
+    if (compact) {
+      this.drawCompactStatus(ctx, r);
+      return;
+    }
     const { screen, theme } = ctx;
     const p = this.ports;
     let x = r.x;
@@ -1365,7 +1476,7 @@ export class App {
         x = screen.text(
           x,
           r.y,
-          '✗ Web Serial not supported in this browser (use Chrome or Edge on desktop)',
+          '✗ No Web Serial or WebUSB in this browser: use Chrome or Edge (desktop or Android)',
           { fg: theme.error },
         );
         break;
@@ -1416,6 +1527,83 @@ export class App {
     // The rates give way to the chip details when the line is too short for both.
     if (right && x + 2 <= r.x + r.w - stringWidth(right))
       screen.text(r.x + r.w - stringWidth(right), r.y, right, { fg: theme.dim });
+  }
+
+  /** `● 303a:1001 115200 · ESP32-S3`: the status line for phones (SPEC §4.1). */
+  private drawCompactStatus(ctx: Ctx, r: Rect): void {
+    const { screen, theme } = ctx;
+    const p = this.ports;
+    const parts: [string, number][] = [];
+    switch (p.state) {
+      case 'unsupported':
+        parts.push(['✗ no Web Serial or WebUSB here', theme.error]);
+        break;
+      case 'none':
+        parts.push(['○ not connected · c', theme.dim]);
+        break;
+      case 'opening':
+        parts.push([`${spinner(ctx)} opening…`, theme.warn]);
+        break;
+      case 'open':
+        parts.push(['● ', theme.ok], [`${describePort(p.port!)} ${p.baudRate}`, theme.fg]);
+        break;
+      case 'busy':
+        parts.push(
+          [`${spinner(ctx)} `, theme.warn],
+          [`${describePort(p.port!)} flasher`, theme.fg],
+        );
+        break;
+      case 'error':
+        parts.push(['✗ error', theme.error]);
+    }
+    const chip = this.jobs.chip;
+    if (chip)
+      parts.push([` · ${chip.name}${chip.flashSize ? ` ${chip.flashSize}` : ''}`, theme.fg]);
+    let x = r.x;
+    for (const [text, fg] of parts) x = screen.text(x, r.y, text, { fg }, r.x + r.w - x);
+  }
+
+  /** The key bar on narrow screens: the few keys that matter most, in that order. */
+  private compactHints(): KeyHint[] {
+    const all = this.hints();
+    if (this.overlay || this.monitor.live || this.jobs.running) return all;
+    const keep = ['c', 'F', '⏎', '?', 'a', 'e', 'f'];
+    return keep.flatMap((k) => all.filter((h) => h.key === k));
+  }
+
+  /** `Esc Tab Ctrl ← ↓ ↑ → ^A ^] kbd A- A+`: keys a phone keyboard lacks (SPEC §4.1). */
+  private drawExtraKeys(ctx: Ctx, r: Rect): void {
+    const { screen, theme } = ctx;
+    // Spread the keys over the row: each its label plus a space either side, or plus one
+    // space when the row is too short for that (a phone in portrait).
+    const roomy = EXTRA_KEYS.reduce((n, [l]) => n + stringWidth(l) + 3, 0) <= r.w;
+    const widths = EXTRA_KEYS.map(([l]) => stringWidth(l) + (roomy ? 3 : 1));
+    const spare = Math.max(0, r.w - widths.reduce((a, b) => a + b, 0));
+    const gap = Math.floor(spare / EXTRA_KEYS.length);
+    let x = r.x;
+    EXTRA_KEYS.forEach(([label, bytes], i) => {
+      // The remainder goes one column each to the first keys, so the row is filled.
+      const w = widths[i]! + gap + (i < spare % EXTRA_KEYS.length ? 1 : 0);
+      if (x + w > r.x + r.w + 1) return;
+      const on = (label === 'Ctrl' && this.ctrlArmed) || (label === 'kbd' && this.keyboardShown);
+      const pad = Math.floor((w - stringWidth(label)) / 2);
+      screen.fill({ x, y: r.y, w: w - 1, h: 1 }, ' ', { bg: on ? theme.selBg : theme.inputBg });
+      screen.text(x + pad, r.y, label, {
+        fg: on ? theme.selFg : theme.keyFg,
+        bg: on ? theme.selBg : theme.inputBg,
+        attrs: Attr.Bold,
+      });
+      ctx.hits.add({ x, y: r.y, w: w - 1, h: 1 }, (e) => {
+        if (e.action !== 'down') return;
+        if (label === 'Ctrl') this.ctrlArmed = !this.ctrlArmed;
+        else if (label === 'A-' || label === 'A+') this.changeFont(label === 'A-' ? -1 : 1);
+        else if (label === 'kbd') {
+          this.keyboardShown = !this.keyboardShown;
+          this.keyboard?.(this.keyboardShown);
+        } else queueMicrotask(() => this.onData(bytes));
+      });
+      x += w;
+    });
   }
 
   private hints(): KeyHint[] {
@@ -1575,16 +1763,19 @@ export class App {
       this.drawConfirm(ctx, o);
       return;
     }
-    const lines = HELP;
-    const keyW = Math.max(...lines.filter(([, d]) => d).map(([k]) => stringWidth(k))) + 2;
-    const descW = Math.max(...lines.map(([, d]) => stringWidth(d ?? '')));
-    const h = Math.min(lines.length + 4, screen.rows - 4);
-    const inner = dialog(
-      ctx,
-      'Help · Esc to close',
-      Math.min(screen.cols - 4, keyW + descW + 6),
-      h,
-    );
+    const keyW = Math.max(...HELP.filter(([, d]) => d).map(([k]) => stringWidth(k))) + 2;
+    const descW = Math.max(...HELP.map(([, d]) => stringWidth(d ?? '')));
+    const w = Math.min(screen.cols - 4, keyW + descW + 6);
+    // Narrow screens (phones): each key on its own line, its description indented below.
+    const stacked = w < keyW + 30;
+    type Line = { key?: string; text: string; head?: boolean };
+    const lines: Line[] = stacked
+      ? HELP.flatMap(([k, d]): Line[] =>
+          d ? [{ key: k.trim(), text: '' }, { text: `  ${d}` }] : [{ text: k, head: true }],
+        )
+      : HELP.map(([k, d]) => (d ? { key: k, text: d } : { text: k, head: true }));
+    const h = Math.min(lines.length + 4, screen.rows - 2);
+    const inner = dialog(ctx, 'Help · Esc to close', w, h);
     // Wheel scrolls anywhere; a click outside the dialog closes it.
     const outer = { x: inner.x - 1, y: inner.y - 1, w: inner.w + 2, h: inner.h + 2 };
     ctx.hits.add({ x: 0, y: 0, w: screen.cols, h: screen.rows }, (e) => {
@@ -1594,14 +1785,16 @@ export class App {
     });
     const body = rows(inner, [1, { flex: 1 }, 1])[1]!;
     o.scroll = Math.max(0, Math.min(o.scroll, lines.length - body.h));
-    lines.slice(o.scroll, o.scroll + body.h).forEach(([k, d], i) => {
+    const bg = theme.inputBg;
+    lines.slice(o.scroll, o.scroll + body.h).forEach((l, i) => {
       const y = body.y + i;
-      if (!d) {
-        screen.text(body.x + 2, y, k, { fg: theme.accent, bg: theme.inputBg, attrs: Attr.Bold });
+      if (l.head) {
+        screen.text(body.x + 2, y, l.text, { fg: theme.accent, bg, attrs: Attr.Bold });
         return;
       }
-      screen.text(body.x + 2, y, k, { fg: theme.keyFg, bg: theme.inputBg, attrs: Attr.Bold });
-      screen.text(body.x + 2 + keyW, y, d, { fg: theme.fg, bg: theme.inputBg }, body.w - keyW - 3);
+      if (l.key) screen.text(body.x + 2, y, l.key, { fg: theme.keyFg, bg, attrs: Attr.Bold });
+      const tx = stacked ? body.x + 2 : body.x + 2 + keyW;
+      screen.text(tx, y, l.text, { fg: theme.fg, bg }, body.x + body.w - tx - 1);
     });
   }
 }

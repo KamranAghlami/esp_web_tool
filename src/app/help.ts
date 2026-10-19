@@ -11,6 +11,7 @@ export const HELP: [string, string?][] = [
   ['i', 'chip info: resets into the bootloader and back'],
   ['Esc', 'while the flasher runs: stop it (asks)'],
   ['?', 'this help'],
+  ['- / +', 'smaller / larger font (remembered)'],
   [''],
   ['Lists and fields'],
   ['↑ ↓  j k', 'move; PgUp/PgDn, g/G jump'],

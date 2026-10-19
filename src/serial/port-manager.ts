@@ -12,6 +12,12 @@ export interface PortEvents {
   onState(state: PortState, detail?: string): void;
 }
 
+/** What PortManager needs of navigator.serial; WebUSB stands in for it on phones. */
+export interface SerialProvider extends EventTarget {
+  requestPort(): Promise<SerialPort>;
+  getPorts(): Promise<SerialPort[]>;
+}
+
 export function serialSupported(): boolean {
   return typeof navigator !== 'undefined' && 'serial' in navigator;
 }
@@ -57,7 +63,7 @@ export class PortManager {
   port: SerialPort | null = null;
   baudRate = 115200;
   format: Format = '8N1';
-  state: PortState = serialSupported() ? 'none' : 'unsupported';
+  state: PortState;
   /** Bytes written to the device so far (for the tx rate). */
   bytesOut = 0;
   /** The control lines as last set (Ctrl+A d toggles them by hand). */
@@ -72,9 +78,14 @@ export class PortManager {
    */
   private awaiting: SerialPortInfo | null = null;
 
-  constructor(private events: PortEvents) {
-    if (!serialSupported()) return;
-    navigator.serial.addEventListener('disconnect', (e) => {
+  /** `serial`: navigator.serial, or the WebUSB stand-in; none means unsupported. */
+  constructor(
+    private events: PortEvents,
+    private serial: SerialProvider | null = serialSupported() ? navigator.serial : null,
+  ) {
+    this.state = serial ? 'none' : 'unsupported';
+    if (!serial) return;
+    serial.addEventListener('disconnect', (e) => {
       const port = this.port;
       if (!port || e.target !== port) return;
       const info = port.getInfo();
@@ -87,7 +98,7 @@ export class PortManager {
         this.awaiting ? 'device unplugged, waiting for it' : 'device unplugged',
       );
     });
-    navigator.serial.addEventListener('connect', (e) => {
+    serial.addEventListener('connect', (e) => {
       const port = e.target as SerialPort;
       if (this.awaiting && !this.port && sameIds(port.getInfo(), this.awaiting)) {
         this.awaiting = null;
@@ -109,7 +120,7 @@ export class PortManager {
    * user activation of the key press or click that triggered it (SPEC §3.1).
    */
   request(): Promise<SerialPort> {
-    return navigator.serial.requestPort();
+    return this.serial!.requestPort();
   }
 
   async open(port: SerialPort, baudRate = this.baudRate): Promise<void> {
@@ -216,7 +227,7 @@ export class PortManager {
       }
       if (Date.now() > until || info.usbVendorId === undefined) return false;
       await sleep(250);
-      const ports = await navigator.serial.getPorts().catch(() => [] as SerialPort[]);
+      const ports = await this.serial!.getPorts().catch(() => [] as SerialPort[]);
       candidates = ports.filter((p) => sameIds(p.getInfo(), info));
     }
   }

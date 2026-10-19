@@ -107,26 +107,26 @@ export class FlashPane {
     const { screen, theme } = ctx;
     const plan = this.plan;
     const f = (w: Focusable) => w === focus;
+    // Phones (SPEC §4.1): no field label, and the options take two rows.
+    const narrow = r.w < 60;
     const [fieldRow, pickRow, statusRow, partsRect, , optsRow, progRow] = rows(r, [
       1,
       1,
       1,
       { flex: 1 },
-      1,
-      1,
+      narrow ? 0 : 1,
+      narrow ? 2 : 1,
       1,
     ]);
 
     // Manifest [ … ] Open…
-    screen.text(fieldRow!.x + 1, fieldRow!.y, 'Manifest', { fg: theme.dim });
+    const label = narrow ? 0 : 10;
+    if (!narrow) screen.text(fieldRow!.x + 1, fieldRow!.y, 'Manifest', { fg: theme.dim });
     const open = ' Open… ';
-    const fieldW = Math.max(8, fieldRow!.w - 11 - stringWidth(open) - 1);
-    this.manifest.render(
-      ctx,
-      { x: fieldRow!.x + 10, y: fieldRow!.y, w: fieldW, h: 1 },
-      f(this.manifest),
-    );
-    const ox = fieldRow!.x + 10 + fieldW + 1;
+    const fieldX = fieldRow!.x + label;
+    const fieldW = Math.max(8, fieldRow!.x + fieldRow!.w - fieldX - stringWidth(open) - 2);
+    this.manifest.render(ctx, { x: fieldX, y: fieldRow!.y, w: fieldW, h: 1 }, f(this.manifest));
+    const ox = fieldX + fieldW + 1;
     screen.text(ox, fieldRow!.y, open, { fg: theme.fg, bg: theme.inputBg });
     ctx.hits.add(
       { x: ox, y: fieldRow!.y, w: stringWidth(open), h: 1 },
@@ -170,14 +170,21 @@ export class FlashPane {
     });
     this.parts.render(ctx, inner, f(this.parts));
 
-    x = optsRow!.x + 1;
-    screen.text(x, optsRow!.y, 'Baud', { fg: theme.dim });
+    // The options flow on, wrapping to the next row when the pane is narrow.
+    const o = optsRow!;
+    let y = o.y;
+    x = o.x + 1;
+    screen.text(x, y, 'Baud', { fg: theme.dim });
     x += 5;
-    this.baud.render(ctx, { x, y: optsRow!.y, w: this.baud.width, h: 1 }, f(this.baud));
+    this.baud.render(ctx, { x, y, w: this.baud.width, h: 1 }, f(this.baud));
     x += this.baud.width + 2;
     for (const cb of [this.eraseAll, this.verify, this.resetAfter]) {
-      if (x + cb.width > optsRow!.x + optsRow!.w) break;
-      cb.render(ctx, { x, y: optsRow!.y, w: cb.width, h: 1 }, f(cb));
+      if (x + cb.width > o.x + o.w) {
+        if (y + 1 >= o.y + o.h) break;
+        y++;
+        x = o.x + 1;
+      }
+      cb.render(ctx, { x, y, w: cb.width, h: 1 }, f(cb));
       x += cb.width + 2;
     }
 

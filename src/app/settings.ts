@@ -19,6 +19,8 @@ export interface Settings {
 export interface UiSettings {
   pane: 'flash' | 'monitor';
   fullscreen: boolean;
+  /** Terminal font size in px; null: the default for the device (13 on phones, else 14). */
+  fontSize: number | null;
 }
 
 export interface DeviceSettings {
@@ -86,7 +88,11 @@ export function defaultDeviceSettings(): DeviceSettings {
 }
 
 export function defaultSettings(): Settings {
-  return { last: defaultDeviceSettings(), ui: { pane: 'flash', fullscreen: false }, devices: {} };
+  return {
+    last: defaultDeviceSettings(),
+    ui: { pane: 'flash', fullscreen: false, fontSize: null },
+    devices: {},
+  };
 }
 
 type Obj = Record<string, unknown>;
@@ -145,6 +151,10 @@ export function parseSettings(json: string | null): Settings {
     ui: {
       pane: oneOf(ui.pane, ['flash', 'monitor'] as const, 'flash'),
       fullscreen: bool(ui.fullscreen, false),
+      fontSize:
+        typeof ui.fontSize === 'number' && ui.fontSize >= 8 && ui.fontSize <= 28
+          ? ui.fontSize
+          : null,
     },
     devices,
   };

@@ -127,13 +127,17 @@ export class PartsTable implements Focusable {
     const base: Style = { fg: sel && focused ? theme.selFg : theme.fg, bg };
     const dim: Style = { fg: theme.dim, bg };
     const red: Style = { fg: theme.error, bg };
+    // Narrow (phones): sizes only on the selected row; errors and loading always show.
+    const narrow = r.w < 50;
     const right = row.loading
       ? `${spinner(ctx)} loading`
       : row.error
         ? row.error
-        : formatSize(row.data?.length ?? 0);
+        : narrow && !sel
+          ? ''
+          : formatSize(row.data?.length ?? 0);
     const del = sel && !row.locked ? ' ✕' : '';
-    const rightW = Math.min(Math.max(10, stringWidth(right)), Math.floor(r.w / 2));
+    const rightW = right ? Math.min(Math.max(10, stringWidth(right)), Math.floor(r.w / 2)) : 0;
     let x = r.x;
     screen.text(x, r.y, sel ? '▶' : ' ', base);
     x += 2;

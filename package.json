@@ -24,13 +24,15 @@
     "@xterm/addon-webgl": "0.19.0",
     "@xterm/headless": "6.0.0",
     "@xterm/xterm": "6.0.0",
-    "esptool-js": "0.7.0"
+    "esptool-js": "0.7.0",
+    "web-serial-polyfill": "1.0.15"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
     "@playwright/test": "1.64.1",
     "@types/node": "24.19.2",
     "@types/w3c-web-serial": "1.0.8",
+    "@types/w3c-web-usb": "1.0.14",
     "eslint": "10.13.0",
     "globals": "17.13.0",
     "prettier": "3.9.10",

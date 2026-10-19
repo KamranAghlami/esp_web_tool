@@ -11,6 +11,8 @@ import { Terminal } from '@xterm/xterm';
 import { App, type DemoMode } from './app/app';
 import { browserFiles } from './browser/files';
 import { indexedDbStore } from './browser/plan-store';
+import { attachTouch, isTouchDevice } from './browser/touch';
+import { UsbSerial } from './browser/usb-serial';
 import { darkTheme } from './tui/theme';
 import { XtermTty } from './tty/xterm-tty';
 
@@ -63,6 +65,19 @@ function demoFromUrl(): DemoMode {
   return v === null ? 'off' : v === 'flood' ? 'flood' : 'normal';
 }
 
+/** Web Serial, else WebUSB with our stand-in (Android without Web Serial), else nothing. */
+function serialProvider() {
+  if ('serial' in navigator) return navigator.serial;
+  if ('usb' in navigator) return new UsbSerial();
+  return null;
+}
+
+/** `?touch=1` / `?touch=0` overrides the touch detection (for testing on a desktop). */
+function touchFromUrl(): boolean {
+  const v = new URLSearchParams(location.search).get('touch');
+  return v === null ? isTouchDevice() : v !== '0';
+}
+
 /** Reading `localStorage` itself throws when site data is blocked. */
 function localStorageOrNone(): Storage | undefined {
   try {
@@ -79,9 +94,12 @@ async function main(): Promise<void> {
     document.fonts.load(`bold 14px ${FONT}`),
   ]).catch(() => {});
 
+  const touch = touchFromUrl();
+  // Phones get 13px, so portrait still has about 48 columns (SPEC §4.1).
+  const phone = touch && Math.min(screen.width, screen.height) < 600;
   const term = new Terminal({
     fontFamily: FONT,
-    fontSize: 14,
+    fontSize: phone ? 13 : 14,
     lineHeight: 1,
     theme: darkTheme.xterm,
     allowProposedApi: true,
@@ -136,6 +154,24 @@ async function main(): Promise<void> {
     term.scrollToBottom();
   };
   new ResizeObserver(refit).observe(host);
+  // The soft keyboard shrinks the visual viewport: keep the whole TUI above it.
+  const vv = window.visualViewport;
+  vv?.addEventListener('resize', () => {
+    host.style.height = `${vv.height}px`;
+    host.style.top = `${vv.offsetTop}px`;
+    refit();
+  });
+  // Typing into a terminal: no autocorrect, capitals or suggestions from the soft keyboard.
+  const ta = term.textarea;
+  if (ta) {
+    const attrs: [string, string][] = [
+      ['autocomplete', 'off'],
+      ['autocorrect', 'off'],
+      ['autocapitalize', 'off'],
+      ['spellcheck', 'false'],
+    ];
+    for (const [k, v] of attrs) ta.setAttribute(k, v);
+  }
   // A face that finishes loading later (first visit, empty cache) can change the cell size.
   document.fonts.addEventListener('loadingdone', refit);
   refit();
@@ -150,9 +186,22 @@ async function main(): Promise<void> {
     files: browserFiles,
     assetProxy: import.meta.env.VITE_ASSET_PROXY as string | undefined,
     manifest: manifestFromUrl(),
+    serial: serialProvider(),
+    touch,
+    // The soft keyboard is xterm's textarea having focus.
+    keyboard: (show) => (show ? term.focus() : term.textarea?.blur()),
+    fontSize: {
+      get: () => term.options.fontSize ?? 14,
+      set: (px) => {
+        term.options.fontSize = px;
+        refit();
+      },
+    },
   });
+  attachTouch(host, term, (data) => app.input(data));
   app.start();
-  term.focus();
+  // On a phone, focusing would pop the keyboard up; the app asks for it when needed.
+  if (!touch) term.focus();
 
   // Handle for e2e tests and debugging in the console.
   Object.assign(window, { __espwt: { app, term } });

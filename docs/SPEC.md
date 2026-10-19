@@ -80,7 +80,7 @@ Target feel: **running a CLI tool through ttyd**. The page is one full-window xt
   - Side effect: the same core could later run in a real terminal under Node (a different `Tty` + serial backend). This is not a v1 goal, but the design should not rule it out.
 - **Rendering**: immediate mode. On each state change (batched per animation frame), widgets draw into a `Screen` cell grid (char, fg, bg, attrs, width). That grid is diffed against the previous frame, and only changed runs are emitted (cursor moves + SGR). Uses the alternate screen and a hidden cursor, except when editing text.
 - **Input**: one parser for xterm's `onData` stream: CSI/SS3 keys, Alt as an ESC prefix, bracketed paste (`?2004`), SGR mouse (`?1000;1006`: click, wheel, drag). Keys and mouse reach the app as a terminal app would get them, which is what makes it feel real.
-- **Layout**: nested horizontal/vertical splits with fixed/flex sizes, recomputed on resize. Three size classes: **wide** (≥ 120 cols, split panes), **normal** (≥ 80×24, one pane at a time) and **compact** (≥ 40×14, phones; §4.1). Only below 40×14 show a "terminal too small" notice, as real TUIs do. M0 still has the old 80×24 minimum, which is why an iPhone 14 Pro (about 48 cols in portrait) shows the notice.
+- **Layout**: nested horizontal/vertical splits with fixed/flex sizes, recomputed on resize. Three size classes: **wide** (≥ 120 cols, split panes), **normal** (≥ 80×24, one pane at a time) and **compact** (≥ 40×14, phones; §4.1). Only below 40×14 show a "terminal too small" notice, as real TUIs do (since M2b; M0 had 80×24, which is why an iPhone 14 Pro showed the notice).
 - **Widgets** (`src/tui/`): Box (title in border), Text, List, Table, TextInput, Select (popup list), Checkbox/Radio, ProgressBar, Dialog/Confirm, StatusBar, KeyBar (which also shows messages), ScrollView, TermPane (the headless blit).
 - **Monitor pane = a terminal inside the terminal.** Device bytes go into an `@xterm/headless` instance sized to the pane. That instance parses ANSI, cursor moves and clears just like a real terminal. Each frame we copy its visible buffer cells (`IBufferCell` gives char, colors, attributes) into the pane region. **Fullscreen** (`f`) makes the focused pane fill the window. We still blit rather than pass bytes straight through, so the key bar and status line stay.
 - **Width**: use the `unicode11` addon, and use the same width table in `Screen`, so our layout and xterm agree. The UI's own strings use no emoji or ambiguous-width glyphs. Box drawing, block elements and `●▶✓✗` are fine.
@@ -188,6 +188,15 @@ Feedback from M0: on an iPhone 14 Pro the app shows "terminal too small". Phones
 - On `visualViewport` resize the app refits, so the TUI sits above the keyboard instead of under it, and the focused field stays visible.
 - xterm's textarea gets `autocomplete/autocorrect/autocapitalize="off"` and `spellcheck=false`. Gboard composition (predictive text) must still produce sane input; test it on a real phone, because this is a known weak spot of xterm.js on Android.
 
+**As built (M2b, 2026-10-19)**, not yet tried on a real phone:
+- **Compact** below 80 columns: the status line is `● 303a:1001 115200 · ESP32-S3`; the key bar keeps `c F ⏎ ? a e f`; the Flash pane drops the field label, wraps its options onto two rows, and shows sizes only on the selected row (errors always); help stacks each key over its description. Below 120 columns both pane names show as tabs (`1 Flash ─ 2 Monitor`), and a tap or click on one switches to it.
+- **Touch** (`src/browser/touch.ts`): a tap is a click at the cell, a vertical swipe is the wheel, with momentum after a fling. Touches don't focus xterm's textarea, so a tap never brings the keyboard up. Long press and the monitor's Select mode are still to do.
+- **Extra-keys bar** on touch devices (`pointer: coarse`, or `?touch=1`): `Esc Tab Ctrl ← ↓ ↑ → ^A ^] kbd A- A+`. `Ctrl` is sticky for the next typed key; `kbd` shows or hides the soft keyboard; `A-`/`A+` change the font.
+- **Soft keyboard**: it is asked for whenever text is wanted (a text field, a dialog's field, the live monitor) and put away otherwise. The page follows `visualViewport`, so the TUI sits above it. The textarea has autocomplete, autocorrect, autocapitalize and spellcheck off.
+- **Font**: 13px on phones, 14px elsewhere; `-` / `+` (or `A-` / `A+`) change it, remembered per browser. Pinch-zoom is off (`user-scalable=no`).
+- **WebUSB fallback** (`src/browser/usb-serial.ts`) when there is no Web Serial: CDC-ACM devices through `web-serial-polyfill` (native-USB ESP32s, CH9102/CH343), and **CH340 through esptool-js's `WebUSBSerialPort`**, which the 2026-10-17 check didn't know about. CP210x and FTDI are refused with a message saying why. Without either API (iPhone, iPad): `✗ no Web Serial or WebUSB here`, and `?demo` still works.
+- Tested at the Pixel 7 size in Playwright (`tests/e2e/phone.spec.ts`): the compact layout, tapping tabs and key-bar entries (a tap is a user gesture, so `requestPort` works), the extra keys, the stacked help.
+
 **Installable (later)**: a web app manifest + service worker lets the app be "installed" so it opens full screen without the URL bar, which suits the terminal feel and also gives offline use (Goal 1).
 
 ### Keyboard
@@ -210,6 +219,7 @@ A browser tab is a hostile terminal. Chrome **does not let pages intercept** `Ct
 | `D` | Dump (read) flash to a file: a dialog takes the offset and size (empty size: to the end of the flash). The file is named `esp32-s3-<mac>-0x000000-0x400000.bin`. The demo log stream moved to `?demo` (§10) |
 | `Esc` while a job runs | Stop it, after a confirmation (a flash stopped halfway may not boot) |
 | `?` | Help overlay listing all keys |
+| `-` / `+` | Smaller / larger font, remembered per browser |
 | `Esc` | Close dialog or overlay, cancel the current input |
 
 **Capital letters mark actions that cannot be undone**: `F` flash, `E` erase, `Ctrl+A C` clear the scrollback. Lowercase keys are safe to press by accident. `D` (dump) is capital only because `d` deletes a part row.
@@ -484,7 +494,7 @@ Settings live in `localStorage`, so every browser (each computer or phone) keeps
 | M0 ✅ | Scaffold (Vite/TS), `Tty` + input parser, Screen/diff renderer, layout + core widgets, keymap, help overlay, CI + Pages deploy. **Spike**: `requestPort()` from a key and from a mouse click via xterm `onData`; headless-terminal blit performance at 2 Mbaud | The empty shell is live on Pages, CI is green, and the spike passes |
 | M1 ✅ | The Manifest field (local file + folder grant, URL, folder URL, GitHub release listing), manifest parser + adapters, editable parts table with red rows and locks, `?manifest=`; esptool-js: chip info (`i`), validation, flash/verify/reset (`F`), erase (`E`), dump to a file (`D`), stop (`Esc`). Tested end to end against a simulated ESP32-S3 (§13); **needs a hardware run** | A local IDF build flashes onto ESP32 and ESP32-S3 |
 | M2 ✅ | Serial monitor, port handoff, native-USB reconnect; timestamps, line input, DTR/RTS, custom baud, save log; focus moves to the monitor after a flash with Reset after. **Needs a hardware run** | Flash → auto-monitor works on a native-USB chip |
-| M2b | **Phones**: compact size class, touch bridge, extra-keys bar, soft-keyboard handling, WebUSB + `web-serial-polyfill` fallback with the CDC-only notice, Android device emulation in e2e | Flash + monitor a native-USB ESP32 from an Android phone over OTG |
+| M2b ✅ | **Phones**: compact size class, touch bridge, extra-keys bar, soft-keyboard handling, WebUSB + `web-serial-polyfill` fallback (plus CH340), Android device emulation in e2e. **Needs a real phone** | Flash + monitor a native-USB ESP32 from an Android phone over OTG |
 | M3 | GitHub release files through the asset proxy (once the rate limit is settled), Manual assist download, release notes | A real release with `esp-web-tool.json` flashes via manual assist |
 | M4 | Proxy hardening (caching, limits) and self-hosting docs, JSON Schema, producer workflow docs | One-click flash from a release link |
 | M5 | Polish: light theme, log save, error hints, accessibility pass, installable app (PWA) | — |
