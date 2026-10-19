@@ -198,15 +198,17 @@ A browser tab is a hostile terminal. Chrome **does not let pages intercept** `Ct
 | `Tab` / `Shift+Tab` | Cycle focus between widgets; `1` / `2` jump to the Flash / Monitor pane |
 | Arrows, `j`/`k`, `PgUp`/`PgDn`, `g`/`G` | Move in lists and tables; `Enter` selects; `Space` toggles |
 | `c` | Connect / disconnect port |
-| `F` | Start flash (confirm dialog with the plan summary) |
-| `E` | Erase entire flash (confirm) |
+| `F` | Flash: the checks of §5.5, then a confirm dialog with the plan summary and warnings |
+| `E` | Erase the entire flash. Its confirm dialog takes only `y` (or a click on Yes), not `Enter` |
+| `i` | Chip info: reset into the bootloader, read the chip, reset back into the app |
 | `Enter` in the Manifest field | Load what it holds (URL, folder URL, GitHub repo); on an empty field, open the file picker |
 | `a` / `e` / `d` / `o` | Parts table: add a part / edit the row's offset and file in the part dialog (also `Enter`) / delete row / allow reading local files (the manifest's folder, or again after a reload). `Space` toggles a row |
 | `Enter` on the Monitor pane | Enter the monitor: **from here every key goes to the device** |
 | `Ctrl+]` | Leave the monitor (back to hotkeys) |
 | `Ctrl+A` | Monitor menu: a centered pop-up that lists its keys and is clickable (live, or with the Monitor pane focused). `r` reset, `b` boot mode, `C` clear, `s` settings ▸ (`b` baud ▸, `f` format 8N1/8E1/7E1… ▸, `e` line ending ▸), `h` log-level colors, `f` fullscreen, `Ctrl+A` send a literal `Ctrl+A`, `?` help; later: `d` DTR, `t` timestamps, `l` save log. Menus open centered on the pane they belong to. Submenus have a `‹ Back` row; Esc and Backspace go back. Current values show in the menu labels and the status line (`303a:1001 @ 115200 8N1`), not in the pane header. |
 | `f` | Fullscreen the focused pane; again to restore |
-| `D` | Dump (read) flash to a file: whole chip or a range (M1). The demo log stream moved to `?demo` (§10) |
+| `D` | Dump (read) flash to a file: a dialog takes the offset and size (empty size: to the end of the flash). The file is named `esp32-s3-<mac>-0x000000-0x400000.bin`. The demo log stream moved to `?demo` (§10) |
+| `Esc` while a job runs | Stop it, after a confirmation (a flash stopped halfway may not boot) |
 | `?` | Help overlay listing all keys |
 | `Esc` | Close dialog or overlay, cancel the current input |
 
@@ -228,11 +230,13 @@ Every action can also be done with the mouse:
 
 ## 5. Flasher
 
-### 5.1 Connect
-1. `Ctrl+O` → `navigator.serial.requestPort()` (optionally filtered to known USB VIDs, but always allow "show all").
-2. esptool-js `Transport` + `ESPLoader.main()` → enter the bootloader (the reset strategy is picked automatically: classic DTR/RTS or USB-Serial/JTAG).
-3. Show in the status line: chip, revision, features, crystal, MAC, detected flash size.
-4. If the bootloader cannot be reached: offer "hold BOOT, tap RESET, retry" instructions (needed for ESP32-S2 native USB, and for boards without auto-reset).
+### 5.1 Connect (as built in M1)
+1. `c` → `navigator.serial.requestPort()`; the port opens in the **monitor**. Connecting doesn't reset the board, so a running device keeps running.
+2. The flasher **borrows the port** for each job (`F` flash, `E` erase, `D` dump, `i` chip info; §9): esptool-js `Transport` + `ESPLoader.main()` reset into the bootloader (classic DTR/RTS or USB-Serial/JTAG, picked by esptool-js), detect the chip, load the stub and raise the baud (`i` and `E` stay at 115200).
+3. The status line then shows the chip, revision, flash size and MAC (`CHIP ESP32-S3 (QFN56) rev v0.2   FLASH 8MB   MAC …`), until the port changes. Before that it says `— i to detect`.
+4. If the bootloader can't be reached, the error says what to do: "hold BOOT, tap RESET, release BOOT, then try again" (needed for ESP32-S2 native USB and boards without auto-reset). Other common errors get hints too: verify failures and timeouts suggest a lower flash baud (`src/app/jobs.ts`, `explain`).
+5. esptool's own messages (`Connecting…`, `Chip is …`, `Hash of data verified`) are written into the monitor, dimmed and under a `── flash ──` header, like a CLI flasher's log. The per-block `Writing at 0x…` lines are left out; the progress bar shows that.
+6. esptool-js is loaded only when the first job runs (a separate chunk of about 150 KB).
 
 ### 5.2 Source: the Manifest field
 There is no source switch (the M0 `Files / GitHub / URL` radio is gone). One editable **Manifest** field says where the plan comes from, and the parts table below it can always be edited by hand.
@@ -277,8 +281,13 @@ The only exception is **rows the manifest locks** (§6: `"locked": true` on a pa
 ### 5.5 Validation (before the flash button is enabled)
 - **Error**: overlapping regions; a part extends past the detected flash size; an empty file; no parts enabled.
 - **Warning** (needs confirmation): offset not 4 KiB aligned; plan chip ≠ detected chip; bootloader offset does not match the chip; image magic byte `0xE9` missing at the bootloader or app offset.
+- As built (`src/flash/validate.ts`): the plan-only checks run on `F`, and their warnings are in the confirm dialog. The chip-dependent ones run once the bootloader has answered; new warnings then get a second dialog while the chip waits in the bootloader.
+- When the chip is detected, guessed bootloader offsets (`?` in the table) become the chip's real one.
+- **Wrong set**: if the selected set names another chip and exactly one set names this chip, that set is selected and the flash stops with "the ESP32-S3 set is now selected, F again". `i` selects it the same way.
 
 ### 5.6 Flash run
+As built: one esptool session per job (`src/flash/esp.ts`, `src/app/jobs.ts`). Progress shows the part being written, a bar, the overall %, and the rate. The verify is esptool's: the stub's MD5 of each region against ours (`src/flash/md5.ts`; WebCrypto has no MD5). esptool-js's own hard reset only lowers RTS without raising it first, so the reset after a job is ours: the monitor reopens, then pulses EN with its tested sequence, which also catches the boot log from its first line.
+
 1. Optionally erase all.
 2. Write each enabled part with compression. Progress is shown per part and overall, with throughput and ETA.
 3. If Verify is on, compare the device's MD5 of each region with the local MD5.
@@ -415,10 +424,10 @@ There is a single `PortManager`. Only one consumer holds the port at a time.
     └──────────── [Monitoring] ◀──────────────────────┘
 ```
 
-- Monitor → Flash: cancel the reader, release the lock, close; then esptool-js opens the port at 115200, syncs, and raises the baud.
-- Flash → Monitor: hard reset, close the transport, reopen at the monitor baud, start the reader.
-- **Native USB (USB-Serial/JTAG, e.g. C3/S3/C6)**: a reset makes the device re-enumerate, so the `SerialPort` object goes away. The manager listens for `navigator.serial` `connect`/`disconnect` events, and on reconnect matches `usbVendorId`/`usbProductId` through `getPorts()`, which needs no gesture. If it cannot match, it asks the user to press `Ctrl+O` again.
-- A physical unplug in any state → `NoPort`, and the status line shows it.
+- Monitor → Flash (`PortManager.acquire`): cancel the reader, release the lock, close; the state is `busy` (status line `⠋ 303a:1001 · flasher`). esptool-js opens the port at 115200, syncs, and raises the baud.
+- Flash → Monitor (`release`): close the transport, reopen at the monitor baud (a set's `monitorBaudrate` if it gives one), start the reader, then reset into the app if Reset after is on.
+- **Native USB (USB-Serial/JTAG, USB-OTG CDC)**: a reset can make the device re-enumerate, so the `SerialPort` object goes away. `release` then retries for 6 s with ports from `getPorts()` that have the same `usbVendorId`/`usbProductId` (no gesture needed).
+- **Unplug and replug** (or a board that resets itself and re-enumerates): the monitor says "device unplugged, waiting for it", and when a port with the same USB ids appears (`navigator.serial` `connect` event), it is reopened: "Reconnected 303a:1001". Disconnecting with `c` stops the waiting.
 
 ## 10. Deep links and settings
 
@@ -462,6 +471,7 @@ Settings live in `localStorage`, so every browser (each computer or phone) keeps
 
 ## 13. Testing
 
+- **Simulated chip** (`tests/fake-esp.ts`): an ESP32-S3 behind a fake port. Its app echoes input and prints a boot log. A reset with IO0 strapped low (DTR during the sequence) enters the ROM, which speaks esptool's SLIP protocol: sync, registers, security info, the stub upload (it answers `OHAI`), baud change, compressed and plain writes, MD5, erase, and read with acks. The same code runs in Vitest (`tests/fake-port.ts`, Node streams) and in the page (the harness injects its source). Not modelled: timing, flow control, flash encryption.
 - **Unit (Vitest)**: input parser (key, mouse and paste sequences); Screen diff renderer (golden frames as text snapshots, rendered into `@xterm/headless` and compared cell by cell); layout; GitHub URL parsing; manifest validation and adapters (fixtures for all three formats); smart offsets; overlap and size validation; the streaming UTF-8 decoder; rate-limit and ETag cache logic (mocked `fetch`).
 - **UI (Playwright)**: a fake `navigator.serial` injected before load. Assertions read the xterm buffer (`term.buffer.active`) as text, which is exactly what the user sees. It drives connect → chip info, the monitor echoing input, keyboard navigation, and the manifest → parts table flow against a mocked GitHub API.
 - **Hardware (manual checklist, per release)**: ESP32 (CP210x), ESP32-S3 (native USB), ESP32-C3 (native USB), ESP32-S2 (native USB, manual boot). For each: flash, verify, auto-monitor, reset, monitor baud change, unplug and replug. **Android phone over OTG**: one native-USB board (polyfill path), one CP210x board (must show the "not supported on this phone" message, or work if the phone has native Web Serial), plus typing in the live monitor with Gboard.
@@ -472,7 +482,7 @@ Settings live in `localStorage`, so every browser (each computer or phone) keeps
 | # | Scope | Done when |
 |---|---|---|
 | M0 ✅ | Scaffold (Vite/TS), `Tty` + input parser, Screen/diff renderer, layout + core widgets, keymap, help overlay, CI + Pages deploy. **Spike**: `requestPort()` from a key and from a mouse click via xterm `onData`; headless-terminal blit performance at 2 Mbaud | The empty shell is live on Pages, CI is green, and the spike passes |
-| M1 | **Started 2026-10-18**: the Manifest field (local file + folder grant, URL, folder URL, GitHub release listing), manifest parser + adapters, editable parts table with red rows and locks, `?manifest=`. **Next**: connect + chip info, validation, flash/verify/reset, erase (`E`), dump flash to a file (`D`) | A local IDF build flashes onto ESP32 and ESP32-S3 |
+| M1 ✅ | The Manifest field (local file + folder grant, URL, folder URL, GitHub release listing), manifest parser + adapters, editable parts table with red rows and locks, `?manifest=`; esptool-js: chip info (`i`), validation, flash/verify/reset (`F`), erase (`E`), dump to a file (`D`), stop (`Esc`). Tested end to end against a simulated ESP32-S3 (§13); **needs a hardware run** | A local IDF build flashes onto ESP32 and ESP32-S3 |
 | M2 | Serial monitor, port handoff, native-USB reconnect | Flash → auto-monitor works on a native-USB chip |
 | M2b | **Phones**: compact size class, touch bridge, extra-keys bar, soft-keyboard handling, WebUSB + `web-serial-polyfill` fallback with the CDC-only notice, Android device emulation in e2e | Flash + monitor a native-USB ESP32 from an Android phone over OTG |
 | M3 | GitHub release files through the asset proxy (once the rate limit is settled), Manual assist download, release notes | A real release with `esp-web-tool.json` flashes via manual assist |

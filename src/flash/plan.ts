@@ -8,6 +8,7 @@ import {
   parseManifest,
   type PlanSet,
 } from './manifest';
+import { sameChip } from './chip';
 import { guessOffset } from './offsets';
 
 /** One row of the parts table. */
@@ -494,6 +495,27 @@ export class FlashPlan {
       error: null,
     }));
     for (const row of this.rows) this.readRow(row);
+    this.onChange();
+  }
+
+  // ---------------------------------------------------------------------------
+  // The detected chip (SPEC §5.2, §6)
+
+  /** The set made for `chip`, or -1 when none (or several) say so. */
+  setFor(chip: string): number {
+    const sets = this.manifest?.sets ?? [];
+    const hits = sets.flatMap((s, i) => (s.chip && sameChip(s.chip, chip) ? [i] : []));
+    return hits.length === 1 ? hits[0]! : -1;
+  }
+
+  /** Guessed bootloader offsets become the chip's real one. */
+  applyChip(bootloaderOffset: number): void {
+    for (const row of this.rows) {
+      if (row.offsetGuessed && /bootloader/i.test(row.name)) {
+        row.offset = bootloaderOffset;
+        row.offsetGuessed = false;
+      }
+    }
     this.onChange();
   }
 

@@ -396,8 +396,8 @@ test.describe('app', () => {
     await page.keyboard.type('app.bin'); // relative to the manifest
     await page.keyboard.press('Enter');
     await expectOnScreen(page, '0x400000  app.bin');
-    await page.keyboard.press('F');
-    await expectOnScreen(page, 'Flash (simulated)');
+    await page.keyboard.press('F'); // the plan is fine now; flashing needs a port
+    await expectOnScreen(page, 'Connect a port first (c)');
   });
 
   test('the flash plan is kept across reloads, edits included', async ({ page }) => {
@@ -469,7 +469,7 @@ test.describe('app', () => {
   test('messages replace the key hints until the next key', async ({ page }) => {
     await expectOnScreen(page, 'c Connect');
     await page.keyboard.press('E');
-    await expectOnScreen(page, 'Erase arrives with esptool-js in M1');
+    await expectOnScreen(page, 'Connect a port first (c)');
     expect((await screenText(page)).join('\n')).not.toContain('c Connect');
     await page.keyboard.press('1');
     await expectOnScreen(page, 'c Connect');
@@ -503,7 +503,8 @@ test.describe('app', () => {
   test('help overlay opens and closes', async ({ page }) => {
     await page.keyboard.press('?');
     await expectOnScreen(page, 'Help · Esc to close');
-    // The key column fits its longest key.
+    // The key column fits its longest key; G jumps to the end.
+    await page.keyboard.press('G');
     await expectOnScreen(page, 'double / triple click  select a word');
     await page.keyboard.press('Escape');
     await expect

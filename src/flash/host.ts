@@ -20,6 +20,8 @@ export interface FileHost {
   restoreFolder(handle: unknown): LocalFolder | null;
   /** Asks to read kept handles again; must run synchronously from input. */
   requestAccess(handles: unknown[]): Promise<void>;
+  /** Offer `data` as a download named `name` (a dump, a log). Needs no gesture. */
+  save(name: string, data: Uint8Array | string): void;
 }
 
 export interface LocalFile {

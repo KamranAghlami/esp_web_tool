@@ -84,6 +84,17 @@ export class MonitorPane implements Focusable {
     }
   }
 
+  /**
+   * Our own text in the scrollback (the flasher's log), dimmed so it reads apart from the
+   * device's output. Not counted as received bytes.
+   */
+  note(text: string, onParsed?: () => void): void {
+    this.hasOutput = true;
+    const body = text.replace(/\r?\n/g, '\r\n');
+    this.pane.write(Uint8Array.from([...this.colorizer.flush()]), onParsed);
+    this.pane.write(`\x1b[0;90m${body}\x1b[0m`, onParsed);
+  }
+
   toggleColorize(): void {
     // Flush a held prefix and end any color the colorizer started mid-line.
     if (this.colorize) this.pane.write(Uint8Array.from([...this.colorizer.flush(), ...RESET]));

@@ -156,6 +156,15 @@ export const browserFiles: FileHost = {
     return isHandle(handle, 'directory') ? folderOf(handle as FileSystemDirectoryHandle) : null;
   },
 
+  save(name, data) {
+    const blob = new Blob([data as BlobPart], { type: 'application/octet-stream' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 60_000);
+  },
+
   async requestAccess(handles) {
     // All requested inside the same gesture; Chrome asks once per handle not yet allowed.
     await Promise.all(

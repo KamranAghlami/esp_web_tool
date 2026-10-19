@@ -1,9 +1,11 @@
 /**
- * Single owner of the SerialPort (SPEC §9). M0 covers connect, raw monitor I/O, baud
- * changes and reset/boot signalling; flashing hand-off arrives with esptool-js in M1.
+ * Single owner of the SerialPort (SPEC §9): connect, raw monitor I/O, baud and format
+ * changes, reset/boot signalling, lending the port to the flasher (`acquire`/`release`), and
+ * following a board that re-enumerates or is plugged back in.
  */
 
-export type PortState = 'unsupported' | 'none' | 'opening' | 'open' | 'error';
+/** `busy`: lent to the flasher; the port stays selected but the monitor is closed. */
+export type PortState = 'unsupported' | 'none' | 'opening' | 'open' | 'busy' | 'error';
 
 export interface PortEvents {
   onData(bytes: Uint8Array): void;
@@ -22,6 +24,11 @@ export function describePort(port: SerialPort): string {
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+const sameIds = (a: SerialPortInfo, b: SerialPortInfo) =>
+  a.usbVendorId !== undefined &&
+  a.usbVendorId === b.usbVendorId &&
+  a.usbProductId === b.usbProductId;
 
 /** Frame formats offered in the monitor menu: data bits, parity (N/E/O), stop bits. */
 export const FORMATS = ['8N1', '8E1', '8O1', '8N2', '7E1', '7O1', '7N1'] as const;
@@ -56,17 +63,37 @@ export class PortManager {
   private reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
   private readLoop: Promise<void> | null = null;
   private encoder = new TextEncoder();
+  /**
+   * The USB ids of a board that went away without the user disconnecting it: when a port
+   * with the same ids comes back (a native-USB reset, or a replug), it is reopened.
+   */
+  private awaiting: SerialPortInfo | null = null;
 
   constructor(private events: PortEvents) {
-    if (serialSupported()) {
-      navigator.serial.addEventListener('disconnect', (e) => {
-        if (e.target === this.port) {
-          this.port = null;
-          this.reader = null;
-          this.setState('none', 'device unplugged');
-        }
-      });
-    }
+    if (!serialSupported()) return;
+    navigator.serial.addEventListener('disconnect', (e) => {
+      const port = this.port;
+      if (!port || e.target !== port) return;
+      const info = port.getInfo();
+      this.reader = null;
+      if (this.state === 'busy') return; // the flasher fails on its own; release() follows the board
+      this.port = null;
+      this.awaiting = info.usbVendorId === undefined ? null : info;
+      this.setState(
+        'none',
+        this.awaiting ? 'device unplugged, waiting for it' : 'device unplugged',
+      );
+    });
+    navigator.serial.addEventListener('connect', (e) => {
+      const port = e.target as SerialPort;
+      if (this.awaiting && !this.port && sameIds(port.getInfo(), this.awaiting)) {
+        this.awaiting = null;
+        void this.open(port).then(
+          () => this.events.onState('open', 'reconnected'),
+          () => {},
+        );
+      }
+    });
   }
 
   private setState(s: PortState, detail?: string): void {
@@ -83,7 +110,7 @@ export class PortManager {
   }
 
   async open(port: SerialPort, baudRate = this.baudRate): Promise<void> {
-    await this.close();
+    await this.close(false);
     this.port = port;
     this.baudRate = baudRate;
     this.setState('opening');
@@ -117,10 +144,18 @@ export class PortManager {
     }
   }
 
-  async close(): Promise<void> {
+  /** Close the port; `forget` (the user disconnected) also stops waiting for it to return. */
+  async close(forget = true): Promise<void> {
+    if (forget) this.awaiting = null;
     const port = this.port;
     if (!port) return;
     this.port = null;
+    await this.stop(port);
+    this.setState('none');
+  }
+
+  /** Stop the reader and close the port, keeping it selected. */
+  private async stop(port: SerialPort): Promise<void> {
     const reader = this.reader;
     this.reader = null;
     try {
@@ -135,7 +170,52 @@ export class PortManager {
     } catch {
       // already closed or unplugged
     }
-    this.setState('none');
+  }
+
+  /** Lend the port to the flasher: the monitor stops and the port is closed for it to open. */
+  async acquire(): Promise<SerialPort> {
+    const port = this.port;
+    if (!port || this.state !== 'open') throw new Error('No port is open');
+    await this.stop(port);
+    this.setState('busy');
+    return port;
+  }
+
+  /**
+   * Take the port back and reopen the monitor, then optionally reset the chip into its app.
+   * A native-USB chip may have re-enumerated meanwhile: then the same USB ids are looked up
+   * with getPorts() (no gesture needed) for up to `waitMs`.
+   */
+  async release(opts: { reset: boolean; baudRate?: number; waitMs?: number }): Promise<void> {
+    const port = this.port;
+    if (!port || this.state !== 'busy') return;
+    if (opts.baudRate) this.baudRate = opts.baudRate;
+    this.port = null;
+    if (!(await this.reopen(port, opts.waitMs ?? 6000))) {
+      this.setState('none', 'the board did not come back after flashing');
+      return;
+    }
+    if (opts.reset) await this.reset();
+  }
+
+  /** Open `port`, or else a port with its USB ids once one (re)appears. */
+  private async reopen(port: SerialPort, waitMs: number): Promise<boolean> {
+    const info = port.getInfo();
+    const until = Date.now() + waitMs;
+    for (let candidates = [port]; ;) {
+      for (const p of candidates) {
+        try {
+          await this.open(p);
+          return true;
+        } catch {
+          // stale object of a re-enumerated device, or not back yet
+        }
+      }
+      if (Date.now() > until || info.usbVendorId === undefined) return false;
+      await sleep(250);
+      const ports = await navigator.serial.getPorts().catch(() => [] as SerialPort[]);
+      candidates = ports.filter((p) => sameIds(p.getInfo(), info));
+    }
   }
 
   async setBaud(baudRate: number): Promise<void> {

@@ -142,6 +142,7 @@ function fakeHost(urls: Record<string, Uint8Array>) {
     restoreFile: (h) => (typeof h === 'string' && disk.has(h) ? kept(h) : null),
     restoreFolder: () => null,
     requestAccess: async (handles) => handles.forEach((h) => allowed.add(h as string)),
+    save: () => {},
   };
   return {
     host,

@@ -26,8 +26,13 @@ import {
   spinner,
 } from '../tui/widgets';
 import { stringWidth } from '../tui/width';
+import { sameChip, sizeBytes } from '../flash/chip';
+import { formatOffset } from '../flash/offsets';
+import { checkPlan } from '../flash/validate';
+import { DumpDialog } from './dump-dialog';
 import { BAUD_RATES, FlashPane, formatSize, isSavedFlash } from './flash-pane';
 import { HELP } from './help';
+import { JobCancelled, JobRunner } from './jobs';
 import { PartEditor } from './part-editor';
 import { LINE_ENDINGS, MonitorPane } from './monitor-pane';
 import type { FileHost } from '../flash/host';
@@ -60,9 +65,10 @@ type MessageKind = 'info' | 'ok' | 'warn' | 'error';
 type Message = { text: string; kind: MessageKind; until: number };
 type Overlay =
   | { kind: 'help'; scroll: number }
-  | { kind: 'confirm'; title: string; body: string[]; onYes: () => void }
+  | { kind: 'confirm'; title: string; body: string[]; danger: boolean; answer(yes: boolean): void }
   | { kind: 'menu'; menu: Menu }
-  | { kind: 'part'; editor: PartEditor };
+  | { kind: 'part'; editor: PartEditor }
+  | { kind: 'dump'; dialog: DumpDialog };
 export type DemoMode = 'off' | 'normal' | 'flood';
 
 /** How a gesture-gated browser call was triggered, for the M0 spike (SPEC §3.1). */
@@ -106,7 +112,9 @@ export class App {
   readonly flash: FlashPane;
   readonly monitor = new MonitorPane();
   readonly ports: PortManager;
+  readonly jobs: JobRunner;
   readonly spike: SpikeRecord[] = [];
+  private files: FileHost;
 
   /** Which pane has focus, and which widget inside the flash pane. */
   pane: 'flash' | 'monitor' = 'flash';
@@ -159,6 +167,7 @@ export class App {
     this.openUrl = opts.openUrl ?? (() => {});
     this.copy = opts.copy ?? (() => Promise.resolve());
     this.plans = opts.plans;
+    this.files = opts.files;
     this.flash = new FlashPane(
       opts.files,
       () => {
@@ -227,7 +236,16 @@ export class App {
       onData: (bytes) => this.monitor.write(bytes, () => this.invalidate()),
       onState: (s, detail) => this.onPortState(s, detail),
     });
-    this.flash.onSimDone = () => this.notify('Simulated run finished (nothing was written)', 'ok');
+    this.jobs = new JobRunner({
+      ports: this.ports,
+      // esptool's per-block "Writing at 0x…" lines would flood the monitor; the bar shows that.
+      log: (text) => {
+        if (!/^Writing at 0x/.test(text)) this.monitor.note(text, this.invalidate);
+      },
+      changed: this.invalidate,
+      now: this.now,
+    });
+    this.flash.jobs = this.jobs;
     this.startDemo = opts.demo ?? 'off';
     this.store = new SettingsStore(opts.storage);
     this.settings = this.store.load();
@@ -394,6 +412,7 @@ export class App {
       const { owner } = this.hits.dispatch(e);
       if (e.action === 'down' && owner && !covered) this.focusWidget(owner);
       if (e.action === 'down' && covered?.kind === 'part') covered.editor.clicked(owner);
+      if (e.action === 'down' && covered?.kind === 'dump') covered.dialog.clicked(owner);
       return;
     }
     this.lastTrigger = 'key';
@@ -401,6 +420,7 @@ export class App {
     if (this.overlay) {
       if (e.type === 'key') this.overlayKey(e);
       else if (this.overlay.kind === 'part') this.overlay.editor.handlePaste(e.text);
+      else if (this.overlay.kind === 'dump') this.overlay.dialog.handlePaste(e.text);
       return;
     }
 
@@ -434,9 +454,22 @@ export class App {
       return true;
     }
     if (e.ctrl || e.alt) return false;
+    if (this.jobs.running) {
+      if (e.name === 'escape') {
+        this.askCancel();
+        return true;
+      }
+      if (['c', 'F', 'E', 'D', 'i'].includes(e.name)) {
+        this.notify('The flasher is busy: Esc stops it', 'warn');
+        return true;
+      }
+    }
     switch (e.name) {
       case 'c':
         this.toggleConnect();
+        return true;
+      case 'i':
+        this.identify();
         return true;
       case 'F':
         this.startFlash();
@@ -445,7 +478,7 @@ export class App {
         this.toggleFullscreen();
         return true;
       case 'E':
-        this.notify('Erase arrives with esptool-js in M1', 'info');
+        this.startErase();
         return true;
       case '1':
         this.focusPane('flash');
@@ -454,7 +487,7 @@ export class App {
         this.focusPane('monitor');
         return true;
       case 'D':
-        this.notify('Dump (read) flash arrives with esptool-js in M1', 'info');
+        this.openDump();
         return true;
       case '?':
         this.overlay = { kind: 'help', scroll: 0 };
@@ -479,19 +512,40 @@ export class App {
       o.editor.handleKey(e);
       return;
     }
+    if (o.kind === 'dump') {
+      o.dialog.handleKey(e);
+      return;
+    }
     if (o.kind === 'help') {
       if (e.name === 'escape' || e.name === 'q' || e.name === '?' || e.name === 'enter')
         this.overlay = null;
       else if (e.name === 'down' || e.name === 'j') o.scroll++;
       else if (e.name === 'up' || e.name === 'k') o.scroll = Math.max(0, o.scroll - 1);
+      else if (e.name === 'pagedown' || e.name === ' ') o.scroll += 10;
+      else if (e.name === 'pageup') o.scroll = Math.max(0, o.scroll - 10);
+      else if (e.name === 'G' || e.name === 'end')
+        o.scroll = HELP.length; // clamped when drawn
+      else if (e.name === 'g' || e.name === 'home') o.scroll = 0;
       return;
     }
-    if (e.name === 'y' || e.name === 'Y' || e.name === 'enter') {
+    if (e.name === 'y' || e.name === 'Y' || (e.name === 'enter' && !o.danger)) {
       this.overlay = null;
-      o.onYes();
+      o.answer(true);
     } else if (e.name === 'n' || e.name === 'N' || e.name === 'escape') {
       this.overlay = null;
+      o.answer(false);
     }
+  }
+
+  /**
+   * A yes/no dialog. Dangerous ones (erase, stopping a flash) take only `y`, not Enter, so a
+   * stray Enter can't confirm them.
+   */
+  private ask(title: string, body: string[], danger = false): Promise<boolean> {
+    return new Promise((resolve) => {
+      this.overlay = { kind: 'confirm', title, body, danger, answer: resolve };
+      this.invalidate();
+    });
   }
 
   /** Keys while the monitor is live go to the device, except Ctrl+] and the Ctrl+A menu. */
@@ -792,29 +846,197 @@ export class App {
       .finally(() => this.invalidate());
   }
 
+  /** The flasher needs the port open in the monitor first; it borrows it from there. */
+  private needPort(): boolean {
+    if (this.ports.state === 'open') return true;
+    this.notify(
+      this.ports.state === 'busy' ? 'The flasher is busy' : 'Connect a port first (c)',
+      'warn',
+    );
+    return false;
+  }
+
+  /** `F`: check the plan, confirm, then flash (SPEC §5.5, §5.6). */
   private startFlash(): void {
-    if (this.flash.running) return;
-    const plan = this.flash.plan;
-    const problem = plan.problem();
-    if (problem) {
-      this.notify(problem, 'warn');
+    if (this.jobs.running) return;
+    const f = this.flash;
+    const pre = checkPlan(f.plan, this.jobs.chip ?? undefined);
+    if (pre.errors.length) {
+      this.notify(pre.errors[0]!, 'warn');
       return;
     }
-    const parts = plan.rows.filter((p) => p.enabled);
+    if (!this.needPort()) return;
+    const parts = f.plan.rows.filter((p) => p.enabled);
     const total = parts.reduce((n, p) => n + p.data!.length, 0);
-    this.overlay = {
-      kind: 'confirm',
-      title: 'Flash (simulated)',
-      body: [
-        `${parts.length} parts · ${formatSize(total)} · ${this.flash.baud.value} baud`,
-        '',
-        'There is no flasher yet: this only animates the progress bar.',
-        'Nothing is sent to any device.',
-        '',
-        'Continue?  y / n',
-      ],
-      onYes: () => this.flash.simulate(this.now()),
-    };
+    const list = parts.slice(0, 8).map((p) => `  ${formatOffset(p.offset)}  ${p.name}`);
+    if (parts.length > 8) list.push(`  … ${parts.length - 8} more`);
+    const body = [
+      `${parts.length} part${parts.length === 1 ? '' : 's'} · ${formatSize(total)} · ${f.baud.value} baud` +
+        (f.eraseAll.checked ? ' · erase all first' : ''),
+      ...list,
+      ...(pre.warnings.length ? ['', ...pre.warnings.map((w) => `! ${w}`)] : []),
+    ];
+    void this.ask('Flash', body).then((yes) => {
+      if (yes) void this.runFlash(pre.warnings);
+    });
+  }
+
+  private async runFlash(confirmed: string[]): Promise<void> {
+    const f = this.flash;
+    const plan = f.plan;
+    const jobs = this.jobs;
+    this.monitor.note('\n── flash ──\n', this.invalidate);
+    const res = await jobs.run(
+      'flash',
+      f.baud.value,
+      // A set may give the app's baud; the monitor switches to it after flashing.
+      { reset: f.resetAfter.checked, baudRate: () => plan.set?.monitorBaudrate },
+      async (s) => {
+        const chip = s.info;
+        plan.applyChip(chip.bootloaderOffset);
+        const want = plan.set?.chip;
+        if (want && !sameChip(want, chip.name)) {
+          const i = plan.setFor(chip.name);
+          if (i >= 0) {
+            plan.selectSet(i);
+            throw new Error(
+              `The set was for ${want}: the ${chip.name} set is now selected, F again`,
+            );
+          }
+        }
+        const checks = checkPlan(plan, chip);
+        if (checks.errors.length) throw new Error(checks.errors[0]);
+        const fresh = checks.warnings.filter((w) => !confirmed.includes(w));
+        if (
+          fresh.length &&
+          !(await this.ask(
+            'Flash: check these first',
+            fresh.map((w) => `! ${w}`),
+          ))
+        )
+          throw new JobCancelled();
+        jobs.checkCancelled();
+
+        const parts = plan.rows
+          .filter((r) => r.enabled)
+          .map((r) => ({ name: r.name, offset: r.offset, data: r.data! }));
+        const total = parts.reduce((n, p) => n + p.data.length, 0);
+        const t0 = this.now();
+        if (f.eraseAll.checked) {
+          jobs.step('Erasing', null);
+          await s.erase();
+        }
+        let current = -1;
+        await s.write(parts, {
+          verify: f.verify.checked,
+          flashMode: plan.set?.flash?.mode,
+          flashFreq: plan.set?.flash?.freq,
+          onProgress: (i, frac) => {
+            const part = parts[i]!;
+            if (i !== current) {
+              current = i;
+              jobs.step(part.name, null, part.data.length);
+            }
+            const before = parts.slice(0, i).reduce((n, p) => n + p.data.length, 0);
+            jobs.progress((before + frac * part.data.length) / total, frac * part.data.length);
+          },
+        });
+        const secs = ((this.now() - t0) / 1000).toFixed(1);
+        return (
+          `Flashed ${parts.length} part${parts.length === 1 ? '' : 's'} (${formatSize(total)})` +
+          `${f.verify.checked ? ', verified,' : ''} in ${secs} s`
+        );
+      },
+    );
+    this.notify(res.text, res.ok ? 'ok' : 'error');
+  }
+
+  /** `E`: erase the whole flash chip, after a confirmation that Enter can't give. */
+  private startErase(): void {
+    if (this.jobs.running || !this.needPort()) return;
+    const body = [
+      'Erases the whole flash chip: firmware, settings (NVS) and file systems.',
+      "This can't be undone.  y to erase, n or Esc to keep it",
+    ];
+    void this.ask('Erase flash', body, true).then(async (yes) => {
+      if (!yes) return;
+      this.monitor.note('\n── erase ──\n', this.invalidate);
+      const res = await this.jobs.run('erase', 115200, { reset: true }, async (s) => {
+        const t0 = this.now();
+        this.jobs.step('Erasing', null);
+        await s.erase();
+        const size = s.info.flashSize ? `the ${s.info.flashSize} flash` : 'the flash';
+        return `Erased ${size} in ${((this.now() - t0) / 1000).toFixed(1)} s`;
+      });
+      this.notify(res.text, res.ok ? 'ok' : 'error');
+    });
+  }
+
+  /** `D`: the Dump dialog, then read and save a file. */
+  private openDump(): void {
+    if (this.jobs.running || !this.needPort()) return;
+    const dialog = new DumpDialog(
+      (offset, size) => void this.runDump(offset, size),
+      () => {
+        if (this.overlay?.kind === 'dump') this.overlay = null;
+        this.invalidate();
+      },
+      (text) => this.notify(text, 'warn'),
+    );
+    this.overlay = { kind: 'dump', dialog };
+  }
+
+  private async runDump(offset: number, size: number | null): Promise<void> {
+    const jobs = this.jobs;
+    this.monitor.note('\n── dump ──\n', this.invalidate);
+    const res = await jobs.run(
+      'dump',
+      this.flash.baud.value,
+      { reset: this.flash.resetAfter.checked },
+      async (s) => {
+        const flash = sizeBytes(s.info.flashSize);
+        const n = size ?? (flash !== null ? flash - offset : null);
+        if (!n || n <= 0) throw new Error("The flash size wasn't detected: give a size");
+        jobs.step(`Reading ${formatSize(n)}`, 0, n);
+        const data = await s.read(offset, n, (done) => jobs.progress(done / n, done));
+        const mac = (s.info.mac ?? '').replace(/:/g, '');
+        // esp32-s3-3485…-0x000000-0x400000.bin: chip, MAC, offset, size
+        const name = `${s.info.name.toLowerCase()}${mac ? `-${mac}` : ''}-${formatOffset(offset)}-${formatOffset(n)}.bin`;
+        this.files.save(name, data);
+        return `Saved ${name}`;
+      },
+    );
+    this.notify(res.text, res.ok ? 'ok' : 'error');
+  }
+
+  /** `i`: reset into the bootloader, read the chip's details, and reset back into the app. */
+  private identify(): void {
+    if (this.jobs.running || !this.needPort()) return;
+    this.monitor.note('\n── chip info ──\n', this.invalidate);
+    void this.jobs
+      .run('identify', 115200, { reset: true }, async (s) => {
+        const c = s.info;
+        const i = this.flash.plan.setFor(c.name);
+        if (i >= 0 && i !== this.flash.plan.setIndex) this.flash.plan.selectSet(i);
+        return [c.description, c.flashSize && `${c.flashSize} flash`, c.mac && `MAC ${c.mac}`]
+          .filter(Boolean)
+          .join(' · ');
+      })
+      .then((res) => this.notify(res.text, res.ok ? 'ok' : 'error'));
+  }
+
+  /** Esc while a job runs: stopping a flash halfway can leave the chip unbootable. */
+  private askCancel(): void {
+    const flashing = this.jobs.state?.kind === 'flash';
+    const body = flashing
+      ? [
+          'Stopping halfway leaves the chip without a complete firmware:',
+          'it may not boot until it is flashed again.  y to stop',
+        ]
+      : ['Stop the running job?  y to stop'];
+    void this.ask('Stop', body, flashing).then((yes) => {
+      if (yes) void this.jobs.cancel();
+    });
   }
 
   private setDemo(mode: DemoMode): void {
@@ -846,7 +1068,10 @@ export class App {
   private onPortState(s: PortState, detail?: string): void {
     this.monitor.active = s === 'open' || this.demo !== 'off';
     if (s !== 'open') this.monitor.live = false;
-    if (detail && s === 'none') this.notify(`Port closed: ${detail}`, 'warn');
+    if (s === 'none') this.jobs.chip = null;
+    if (detail === 'reconnected')
+      this.notify(`Reconnected ${describePort(this.ports.port!)}`, 'ok');
+    else if (detail && s === 'none') this.notify(`Port closed: ${detail}`, 'warn');
     this.invalidate();
   }
 
@@ -1032,19 +1257,40 @@ export class App {
           fg: theme.fg,
         });
         break;
+      case 'busy':
+        x = screen.text(x, r.y, `${spinner(ctx)} `, { fg: theme.warn });
+        x = screen.text(x, r.y, `${describePort(p.port!)} · flasher`, { fg: theme.fg });
+        break;
       case 'error':
         x = screen.text(x, r.y, '✗ error', { fg: theme.error });
         break;
     }
     x = screen.text(x + 3, r.y, 'CHIP ', { fg: theme.dim });
-    screen.text(x, r.y, '— (detection in M1)', { fg: theme.dim });
+    const chip = this.jobs.chip;
+    if (chip) {
+      // `ESP32-S3 (QFN56) (revision v0.2)` → `ESP32-S3 (QFN56) rev v0.2`
+      const name = chip.description.replace(/\(revision (v[\d.]+)\)/, 'rev $1');
+      x = screen.text(x, r.y, name, { fg: theme.fg });
+      if (chip.flashSize) {
+        x = screen.text(x + 3, r.y, 'FLASH ', { fg: theme.dim });
+        x = screen.text(x, r.y, chip.flashSize, { fg: theme.fg });
+      }
+      if (chip.mac) {
+        x = screen.text(x + 3, r.y, 'MAC ', { fg: theme.dim });
+        x = screen.text(x, r.y, chip.mac, { fg: theme.fg });
+      }
+    } else {
+      x = screen.text(x, r.y, p.port ? '— i to detect' : '—', { fg: theme.dim });
+    }
 
     const showRate = this.demo !== 'off' || p.state === 'open';
     const { rxPerSec, txPerSec, fps } = this.stats;
     const right = showRate
       ? `${this.demo !== 'off' ? `demo:${this.demo} ` : ''}rx ${formatSize(rxPerSec)}/s · tx ${formatSize(txPerSec)}/s · ${fps} fps`
       : '';
-    if (right) screen.text(r.x + r.w - stringWidth(right), r.y, right, { fg: theme.dim });
+    // The rates give way to the chip details when the line is too short for both.
+    if (right && x + 2 <= r.x + r.w - stringWidth(right))
+      screen.text(r.x + r.w - stringWidth(right), r.y, right, { fg: theme.dim });
   }
 
   private hints(): KeyHint[] {
@@ -1062,6 +1308,34 @@ export class App {
         { key: 'Tab', label: 'Next field' },
         { key: '⏎', label: editor.row ? 'Save' : 'Add', action: () => editor.save() },
         { key: 'Esc', label: 'Cancel', action: () => (this.overlay = null) },
+      ];
+    }
+    if (this.overlay?.kind === 'dump') {
+      const dialog = this.overlay.dialog;
+      return [
+        { key: 'Tab', label: 'Next field' },
+        { key: '⏎', label: 'Read', action: () => dialog.submit() },
+        { key: 'Esc', label: 'Cancel', action: () => (this.overlay = null) },
+      ];
+    }
+    if (this.overlay?.kind === 'confirm') {
+      const o = this.overlay;
+      const answer = (yes: boolean) => () => {
+        this.overlay = null;
+        o.answer(yes);
+      };
+      return [
+        { key: 'y', label: 'Yes', action: answer(true) },
+        { key: 'n', label: 'No', action: answer(false) },
+        { key: 'Esc', label: 'No', action: answer(false) },
+      ];
+    }
+    if (this.jobs.running) {
+      return [
+        { key: 'Esc', label: 'Stop', action: () => this.askCancel() },
+        { key: '1/2', label: 'Pane' },
+        { key: 'f', label: 'Fullscreen', action: () => this.toggleFullscreen() },
+        { key: '?', label: 'Help', action: () => (this.overlay = { kind: 'help', scroll: 0 }) },
       ];
     }
     if (this.monitor.live) {
@@ -1089,13 +1363,50 @@ export class App {
     return [
       { key: 'c', label: connected ? 'Disconnect' : 'Connect', action: () => this.toggleConnect() },
       { key: 'F', label: 'Flash', action: () => this.startFlash() },
-      { key: 'E', label: 'Erase' },
+      { key: 'E', label: 'Erase', action: () => this.startErase() },
       ...local,
       { key: 'f', label: 'Fullscreen', action: () => this.toggleFullscreen() },
       { key: '⏎', label: 'Monitor', action: () => (this.focusPane('monitor'), this.enterLive()) },
-      { key: 'D', label: 'Dump' },
+      { key: 'D', label: 'Dump', action: () => this.openDump() },
+      { key: 'i', label: 'Chip', action: () => this.identify() },
       { key: '?', label: 'Help', action: () => (this.overlay = { kind: 'help', scroll: 0 }) },
     ];
+  }
+
+  /** Body lines (`! …` in the warning color), then clickable `y Yes` / `n No`. */
+  private drawConfirm(ctx: Ctx, o: Extract<Overlay, { kind: 'confirm' }>): void {
+    const { screen, theme } = ctx;
+    const bg = theme.inputBg;
+    const w = Math.min(
+      screen.cols - 4,
+      Math.max(36, ...o.body.map(stringWidth), stringWidth(o.title)) + 6,
+    );
+    const inner = dialog(ctx, o.title, w, o.body.length + 6, o.danger ? theme.error : theme.warn);
+    o.body.forEach((l, i) =>
+      screen.text(
+        inner.x + 2,
+        inner.y + 1 + i,
+        l,
+        { fg: l.startsWith('!') ? theme.warn : theme.fg, bg },
+        inner.w - 3,
+      ),
+    );
+    const y = inner.y + inner.h - 2;
+    let x = inner.x + Math.floor((inner.w - 17) / 2);
+    for (const [key, label, yes] of [
+      ['y', 'Yes', true],
+      ['n', 'No', false],
+    ] as const) {
+      const start = x;
+      x = screen.text(x, y, ` ${key} `, { fg: theme.keyFg, bg: theme.border, attrs: Attr.Bold });
+      x = screen.text(x, y, `${label} `, { fg: theme.fg, bg: theme.border });
+      ctx.hits.add({ x: start, y, w: x - start, h: 1 }, (e) => {
+        if (e.action !== 'down') return;
+        this.overlay = null;
+        o.answer(yes);
+      });
+      x += 3;
+    }
   }
 
   /** `✓ Connected 303a:1001 @ 115200 8N1`: a colored mark, then the text. Click dismisses. */
@@ -1125,12 +1436,12 @@ export class App {
       o.editor.render(ctx, this.rects.flash ?? this.rects.main!);
       return;
     }
+    if (o.kind === 'dump') {
+      o.dialog.render(ctx, this.rects.flash ?? this.rects.main!);
+      return;
+    }
     if (o.kind === 'confirm') {
-      const w = Math.max(...o.body.map(stringWidth), stringWidth(o.title)) + 6;
-      const inner = dialog(ctx, o.title, w, o.body.length + 4, theme.warn);
-      o.body.forEach((l, i) =>
-        screen.text(inner.x + 2, inner.y + 1 + i, l, { fg: theme.fg, bg: theme.inputBg }),
-      );
+      this.drawConfirm(ctx, o);
       return;
     }
     const lines = HELP;

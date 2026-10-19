@@ -1,4 +1,6 @@
 import { expect, type Page } from '@playwright/test';
+import { md5 } from '../../src/flash/md5';
+import { createFakeEsp } from '../fake-esp';
 import { installFakeFiles } from './fake-files';
 import { installFakeSerial } from './fake-serial';
 
@@ -32,6 +34,10 @@ export async function openApp(
     const info = JSON.parse(new URL(route.request().url()).searchParams.get('d')!) as ReadyInfo;
     if (!settle || !info.active) resolveReady(info);
     return route.fulfill({ status: 204 });
+  });
+  // The simulated chip and its MD5 are self-contained functions, injected as source.
+  await page.addInitScript({
+    content: `window.__md5 = ${md5.toString()};\nwindow.__createFakeEsp = ${createFakeEsp.toString()};`,
   });
   await page.addInitScript(installFakeSerial);
   await page.addInitScript(installFakeFiles);

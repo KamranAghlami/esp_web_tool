@@ -15,6 +15,7 @@ import {
 } from '../tui/widgets';
 import { padEnd, stringWidth, truncate } from '../tui/width';
 import { formatSize } from './format';
+import type { JobRunner } from './jobs';
 import { PartsTable } from './parts-table';
 
 export { formatSize } from './format';
@@ -32,13 +33,6 @@ export interface SavedFlash {
 export const isSavedFlash = (v: unknown): v is SavedFlash =>
   typeof v === 'object' && v !== null && (v as SavedFlash).v === 1;
 
-interface SimRun {
-  start: number;
-  /** Bytes per millisecond. */
-  rate: number;
-  total: number;
-}
-
 /**
  * The Flash pane (SPEC §5.2): one Manifest field (URL, folder URL, owner/repo, or a picked
  * file), Release and Set pickers when they apply, the editable parts table, and the options.
@@ -55,8 +49,8 @@ export class FlashPane {
   readonly verify = new Checkbox('Verify', true);
   readonly resetAfter = new Checkbox('Reset after', true);
 
-  private sim: SimRun | null = null;
-  onSimDone?: () => void;
+  /** The flasher jobs, for the progress line (set by the App). */
+  jobs: JobRunner | null = null;
   /** Enter was pressed in the Manifest field. */
   onSubmitted?: () => void;
 
@@ -107,19 +101,6 @@ export class FlashPane {
       this.verify,
       this.resetAfter,
     ];
-  }
-
-  get running(): boolean {
-    return this.sim !== null;
-  }
-
-  /** M0 only: animate a flash run without touching a device. */
-  simulate(now: number): void {
-    const total = this.plan.rows
-      .filter((p) => p.enabled)
-      .reduce((n, p) => n + (p.data?.length ?? 0), 0);
-    // Roughly what esptool achieves at 921600 baud with compression.
-    this.sim = { start: now, rate: 0.6 * 1024, total };
   }
 
   render(ctx: Ctx, r: Rect, focus: Focusable | null): void {
@@ -203,40 +184,38 @@ export class FlashPane {
     this.renderProgress(ctx, progRow!);
   }
 
+  /** The running job (step, bar, %, rate), else how the last one ended, else a hint. */
   private renderProgress(ctx: Ctx, r: Rect): void {
     const { screen, theme } = ctx;
-    if (!this.sim) {
-      screen.text(
-        r.x + 1,
-        r.y,
-        'Ready.  F starts a simulated run (no device writes yet)',
-        { fg: theme.dim },
-        r.w - 2,
-      );
+    const job = this.jobs?.state;
+    const last = this.jobs?.last;
+    const w = r.w - 2;
+    if (!job) {
+      if (last) {
+        const [mark, color] = last.ok ? ['✓ ', theme.ok] : ['✗ ', theme.error];
+        screen.text(r.x + 1, r.y, truncate(mark + last.text, w), { fg: color });
+      } else {
+        const hint = 'F flash · E erase · D dump · i chip info';
+        screen.text(r.x + 1, r.y, truncate(hint, w), { fg: theme.dim });
+      }
       return;
     }
-    const done = Math.min(this.sim.total, (ctx.now - this.sim.start) * this.sim.rate);
-    // Find the part currently being "written".
-    let acc = 0;
-    let current = '';
-    for (const p of this.plan.rows.filter((p) => p.enabled)) {
-      current = p.name;
-      const size = p.data?.length ?? 0;
-      if (done < acc + size) break;
-      acc += size;
-    }
-    const frac = this.sim.total ? done / this.sim.total : 1;
-    const pct = `${Math.floor(frac * 100)}%`.padStart(4);
-    const rate = `${formatSize(this.sim.rate * 1000)}/s`;
     const nameW = Math.min(22, Math.floor(r.w / 3));
-    screen.text(r.x + 1, r.y, padEnd(truncate(current, nameW), nameW), { fg: theme.fg });
-    const barW = Math.max(4, r.w - nameW - 2 - pct.length - rate.length - 4);
-    progressBar(ctx, r.x + 2 + nameW, r.y, barW, frac, { fg: theme.ok, bg: theme.inputBg });
-    screen.text(r.x + 3 + nameW + barW, r.y, `${pct}  ${rate}`, { fg: theme.fg, attrs: Attr.Bold });
-    if (done >= this.sim.total) {
-      this.sim = null;
-      this.onSimDone?.();
+    screen.text(r.x + 1, r.y, padEnd(truncate(job.step, nameW), nameW), { fg: theme.fg });
+    const secs = (ctx.now - job.since) / 1000;
+    const rate = job.bytes && secs > 0.3 ? `${formatSize(job.bytes / secs)}/s` : '';
+    const pct = job.fraction === null ? '' : `${Math.floor(job.fraction * 100)}%`.padStart(4);
+    const tail = [pct, rate].filter(Boolean).join('  ');
+    const barW = Math.max(4, r.w - nameW - 4 - stringWidth(tail));
+    if (job.fraction === null) {
+      screen.text(r.x + 2 + nameW, r.y, spinner(ctx), { fg: theme.accent });
+    } else {
+      progressBar(ctx, r.x + 2 + nameW, r.y, barW, job.fraction, {
+        fg: theme.ok,
+        bg: theme.inputBg,
+      });
     }
+    screen.text(r.x + 3 + nameW + barW, r.y, tail, { fg: theme.fg, attrs: Attr.Bold });
     ctx.invalidate();
   }
 }

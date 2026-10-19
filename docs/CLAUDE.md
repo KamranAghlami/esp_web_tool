@@ -12,7 +12,9 @@ Browser-based TUI (feels like a CLI running through ttyd) for flashing Espressif
 - `src/app/` — the program: panes, keymap, overlays
 - `src/monitor/` — headless-xterm `TermPane` (blitted into the monitor pane), demo stream
 - `src/serial/` — `PortManager`, the single owner of the `SerialPort`
-- `src/flash/` — the flash plan: manifest parser + adapters, Manifest-field targets, GitHub releases, `FlashPlan` (rows, red rows, locks). No DOM: it talks to the browser through `FileHost`
+- `src/flash/` — the flash plan: manifest parser + adapters, Manifest-field targets, GitHub releases, `FlashPlan` (rows, red rows, locks), checks (`validate.ts`), and `esp.ts`, the esptool-js session (lazy-loaded; `chip.ts` holds what doesn't need it). No DOM: it talks to the browser through `FileHost`
+- `src/app/jobs.ts` — flasher jobs: borrow the port from `PortManager`, run one esptool session, give it back
+- `tests/fake-esp.ts` — the simulated ESP32-S3 (ROM + stub over SLIP) used by unit and e2e tests; self-contained so its source can be injected into the page
 - `src/browser/` — DOM-side implementations (`files.ts`: pickers, folder access, fetch, kept handles; `plan-store.ts`: IndexedDB)
 - `src/app/settings.ts` — what is remembered in `localStorage`: last used, per USB device, layout
 
